@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebTransport Client</title>
+</head>
+<body>
+<script>
+(async function main() {
+  // Injected by WKUserScript before this script runs:
+  //   window.RELAY_URL, window.CERT_FINGERPRINT
+  const url = window.RELAY_URL;
+  const fpHex = window.CERT_FINGERPRINT;  // "DC:76:40:..."
+
+  if (!url || !fpHex) {
+    window.webkit.messageHandlers.status.postMessage('error: missing config');
+    return;
+  }
+
+  const fpBytes = new Uint8Array(fpHex.split(':').map(h => parseInt(h, 16)));
+
+  function uint8ToBase64(bytes) {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  for (;;) {
+    try {
+      const wt = new WebTransport(url, {
+        serverCertificateHashes: [{
+          algorithm: 'sha-256',
+          value: fpBytes
+        }]
+      });
+
+      await wt.ready;
+      window.webkit.messageHandlers.status.postMessage('connected');
+
+      // The relay opens exactly one persistent uni stream per subscriber.
+      // Frames are length-prefixed: [4B length BE][1B flags][Annex-B NALs].
+      const streamReader = wt.incomingUnidirectionalStreams.getReader();
+      const { value: stream, done: streamDone } = await streamReader.read();
+      if (streamDone || !stream) {
+        window.webkit.messageHandlers.status.postMessage('disconnected');
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+
+      const reader = stream.getReader();
+      // Accumulator for bytes that have arrived but not yet consumed
+      let pending = new Uint8Array(0);
+
+      // Append new chunk to pending buffer
+      function append(chunk) {
+        const merged = new Uint8Array(pending.byteLength + chunk.byteLength);
+        merged.set(pending, 0);
+        merged.set(chunk, pending.byteLength);
+        pending = merged;
+      }
+
+      // Read exactly n bytes, fetching from stream as needed.
+      // Returns Uint8Array or null on EOF.
+      async function readN(n) {
+        while (pending.byteLength < n) {
+          const { value, done } = await reader.read();
+          if (done) return null;
+          append(value);
+        }
+        const result = pending.slice(0, n);
+        pending = pending.slice(n);
+        return result;
+      }
+
+      // Parse frames until stream closes
+      for (;;) {
+        const lenBytes = await readN(4);
+        if (!lenBytes) break;
+
+        const frameLen = (lenBytes[0] << 24) | (lenBytes[1] << 16) |
+                         (lenBytes[2] << 8)  |  lenBytes[3];
+
+        const frameBytes = await readN(frameLen);
+        if (!frameBytes) break;
+
+        // frameBytes = [1B flags][Annex-B NALs] — exactly what H264Decoder expects
+        window.webkit.messageHandlers.frame.postMessage(uint8ToBase64(frameBytes));
+      }
+
+      window.webkit.messageHandlers.status.postMessage('disconnected');
+    } catch (e) {
+      window.webkit.messageHandlers.status.postMessage('error: ' + e.message);
+    }
+
+    // Back-off before reconnecting
+    await new Promise(r => setTimeout(r, 2000));
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# Rust build artifacts
+relay/target/
+streamer/target/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.build/
+*.xcscmblueprint
+
+# macOS
+.DS_Store
