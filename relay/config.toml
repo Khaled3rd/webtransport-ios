@@ -1,0 +1,11 @@
+[server]
+bind = "0.0.0.0:4433"
+publish_path = "/publish"
+subscribe_path = "/watch"
+publish_token = "secret-publish-token"
+max_subscribers = 50
+
+[tls]
+cert_path = "/home/b/.relay/cert.pem"
+key_path  = "/home/b/.relay/key.pem"
+cert_validity_days = 14

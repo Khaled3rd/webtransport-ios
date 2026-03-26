@@ -1,0 +1,17 @@
+[camera]
+device = "/dev/video0"
+width = 1280
+height = 720
+fps = 30
+pixel_format = "YUYV"
+
+[encoder]
+profile = "baseline"
+tune = "zerolatency"
+bitrate_kbps = 2000
+keyframe_interval = 30
+
+[relay]
+url = "https://ruh.sunbour.com:4433/publish"
+token = "secret-publish-token"
+cert_fingerprint = "DC:76:40:8B:42:7D:95:9E:66:D0:10:55:98:4F:2B:AF:31:5B:F9:E4:12:0D:72:74:E7:7A:41:F2:0B:3E:1F:10"
