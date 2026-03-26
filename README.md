@@ -20,8 +20,10 @@ Frames travel on a single persistent unidirectional QUIC stream with a simple le
 ## Repository Layout
 
 ```
-relay/          Rust WebTransport relay server (wtransport 0.4, vendored)
-streamer/       Rust V4L2 → x264 → WebTransport streamer (vendored x264 + wtransport)
+ios-app/                  Swift source — iOS receiver app
+WebTransport.xcodeproj/   Xcode project file
+relay/                    Rust WebTransport relay server (wtransport 0.4, vendored)
+streamer/                 Rust V4L2 → x264 → WebTransport streamer (vendored x264 + wtransport)
 ```
 
 ---
@@ -245,37 +247,118 @@ pkill -9 -f "target/release/streamer"
 
 ---
 
-## iOS App Integration
+## iOS App
 
-The iOS app (`/WebTransport/WebTransport/` in the parent repo) uses a hidden `WKWebView`
-that runs the WebTransport JS client.
+### What it does
+
+- Receives the live H264 stream from the relay over WebTransport
+- Displays video full-screen with a blinking **LIVE** badge when connected
+- Reconnects automatically on disconnect
+
+### Requirements
+
+| Tool | Version |
+|------|---------|
+| Xcode | 16+ (tested on Xcode 26.3) |
+| iOS deployment target | iOS 17+ (tested on iOS 26.2) |
+| Device | Physical iPhone or iPad (WebTransport is not available in the Simulator) |
+
+### Project structure
+
+```
+ios-app/
+  Configuration.swift      Relay URL + TLS cert fingerprint
+  WebTransportApp.swift    App entry point (@main)
+  ContentView.swift        Root view — composes all components
+  WebTransportView.swift   Hidden WKWebView running the JS WebTransport client
+  WebTransportBridge.swift WKScriptMessageHandler — bridges JS frames to H264Decoder
+  H264Decoder.swift        Annex-B parser → AVCC CMSampleBuffer builder
+  StreamRenderer.swift     AVSampleBufferDisplayLayer SwiftUI wrapper
+  NalRingBuffer.swift      Ring buffer for NAL assembly
+  webtransport.html        Reference JS client (not loaded by the app — see below)
+WebTransport.xcodeproj/    Xcode project (PBXFileSystemSynchronizedRootGroup)
+```
 
 ### Configuration — `Configuration.swift`
 
+The only file you need to edit before building:
+
 ```swift
 enum Configuration {
-    static let relayURL        = "https://ruh.sunbour.com:4433/watch"
-    static let certFingerprint = "DC:76:40:8B:42:7D:..."   // from relay startup log
+    static let relayURL        = "https://your-relay-host:4433/watch"
+    static let certFingerprint = "DC:76:40:8B:42:7D:..."  // from relay startup log
 }
 ```
 
-Update `certFingerprint` every time the relay TLS cert is rotated, then rebuild and
-reinstall the app.
-
-### Wire protocol (JS ↔ Swift bridge)
-
-The JS in `WebTransportView.swift` reads one persistent inbound unidirectional stream and
-parses length-prefixed frames:
+`certFingerprint` must be the **colon-separated uppercase SHA-256** of the relay's
+self-signed TLS cert. The relay prints it at startup:
 
 ```
-[4B big-endian uint32: total payload length]
-[payload: 1B flags | Annex-B NALs]
+INFO relay: TLS cert fingerprint (SHA-256): DC:76:40:8B:42:7D:...
 ```
 
-Frames are forwarded to `WebTransportBridge` as base64 strings via
-`webkit.messageHandlers.frame`, which decodes them and feeds them to `H264Decoder`.
-`H264Decoder` assembles AVCC `CMSampleBuffer`s and hands them directly to
-`AVSampleBufferDisplayLayer` — no `VTDecompressionSession` is used.
+Update this value (and rebuild the app) every time the relay cert is rotated.
+
+### Build & run
+
+1. Open `WebTransport.xcodeproj` in Xcode.
+2. Select your iPhone/iPad as the run destination (not a Simulator).
+3. Set your Development Team in **Signing & Capabilities**.
+4. Edit `Configuration.swift` with your relay URL and cert fingerprint.
+5. Press **Run** (⌘R).
+
+### How it works
+
+```
+WKWebView (1×1 px, invisible)
+  │  JS opens WebTransport to relay /watch
+  │  Reads one persistent unidirectional stream
+  │  Parses [4B length][1B flags][Annex-B NALs] frames
+  │  Posts base64 frame strings to Swift via webkit.messageHandlers.frame
+  ▼
+WebTransportBridge  (WKScriptMessageHandler, @MainActor)
+  │  Base64-decodes the payload
+  │  Calls H264Decoder.decode(payload:)
+  ▼
+H264Decoder  (@MainActor)
+  │  Finds Annex-B NAL boundaries (0x000001 / 0x00000001 start codes)
+  │  Extracts SPS (type 7) and PPS (type 8) → builds CMVideoFormatDescription
+  │  Packs VCL NALs (type 1 / 5) into AVCC CMSampleBuffer
+  │    • malloc-owned memory so AVSampleBufferDisplayLayer can retain it
+  │    • kCMSampleAttachmentKey_DisplayImmediately set to bypass PTS scheduling
+  │  Calls onSampleBuffer(sampleBuffer)
+  ▼
+StreamRenderer / VideoDisplayLayer
+     AVSampleBufferDisplayLayer.enqueue(_:)
+     → hardware H264 decode → screen
+```
+
+No `VTDecompressionSession` is used. `AVSampleBufferDisplayLayer` accepts AVCC H264
+`CMSampleBuffer`s directly and handles all decoding internally.
+
+> **Note on `webtransport.html`**: This file is a standalone reference copy of the JS
+> client. The app does **not** load it from disk — the JS is baked directly into the
+> HTML string inside `WebTransportView.swift`'s `buildHTML()` function. This avoids
+> WKWebView sandbox errors (`Could not create a sandbox extension`) that occur with
+> `loadFileURL`. If you modify the JS, edit `WebTransportView.swift`.
+
+### Expected log output (healthy stream)
+
+```
+[WT] status: connected
+[bridge] frame #1 size=3210 header=1
+[decoder] payload=3210B header=1 nals=11
+[decoder] SPS size=22
+[decoder] PPS size=4
+[decoder] format description built OK
+[decoder] submitFrame pts=0 vclNals=9
+[renderer] enqueued frame, layer status: 0
+[bridge] frame #2 size=820 header=0
+[decoder] submitFrame pts=1 vclNals=8
+[renderer] enqueued frame, layer status: 0
+```
+
+`header=1` = keyframe, `header=0` = delta frame, `layer status: 0` = rendering OK.
 
 ---
 
