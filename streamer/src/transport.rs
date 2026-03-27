@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use wtransport::{ClientConfig, Endpoint};
-use wtransport::tls::Sha256Digest;
 use crate::config::RelayConfig;
 use crate::encoder::{Direction, EncoderCommand, NalUnit};
 use crate::error::StreamerError;
@@ -13,14 +12,13 @@ pub async fn run_transport(
     enc_cmd_tx: mpsc::Sender<(EncoderCommand, u64)>,
     resp_bcast_tx: Arc<broadcast::Sender<(u64, String)>>,
 ) -> Result<(), StreamerError> {
-    let fingerprint_bytes = parse_fingerprint(&config.cert_fingerprint)?;
 
     let mut backoff = Duration::from_secs(1);
 
     loop {
         tracing::info!("Connecting to relay: {}", config.url);
 
-        match connect_and_stream(&config, &fingerprint_bytes, &mut rx, &enc_cmd_tx, &resp_bcast_tx).await {
+        match connect_and_stream(&config, &mut rx, &enc_cmd_tx, &resp_bcast_tx).await {
             Ok(_) => {
                 tracing::info!("Transport session ended cleanly");
                 backoff = Duration::from_secs(1);
@@ -36,16 +34,13 @@ pub async fn run_transport(
 
 async fn connect_and_stream(
     config: &RelayConfig,
-    fingerprint_bytes: &[u8; 32],
     rx: &mut mpsc::Receiver<Vec<NalUnit>>,
     enc_cmd_tx: &mpsc::Sender<(EncoderCommand, u64)>,
     resp_bcast_tx: &Arc<broadcast::Sender<(u64, String)>>,
 ) -> Result<(), StreamerError> {
-    let digest = Sha256Digest::new(*fingerprint_bytes);
-
     let client_config = ClientConfig::builder()
         .with_bind_default()
-        .with_server_certificate_hashes([digest])
+        .with_native_certs()
         .build();
 
     let endpoint = match Endpoint::client(client_config) {
@@ -240,17 +235,3 @@ async fn recv_exact(stream: &mut wtransport::RecvStream, buf: &mut [u8]) -> Resu
     Ok(true)
 }
 
-fn parse_fingerprint(hex_str: &str) -> Result<[u8; 32], StreamerError> {
-    let bytes: Vec<u8> = hex_str
-        .split(':')
-        .map(|part| {
-            u8::from_str_radix(part, 16)
-                .map_err(|e| StreamerError::Transport(format!("Invalid fingerprint hex '{part}': {e}")))
-        })
-        .collect::<Result<Vec<u8>, StreamerError>>()?;
-
-    bytes.try_into()
-        .map_err(|v: Vec<u8>| StreamerError::Transport(
-            format!("Fingerprint must be 32 bytes, got {}", v.len())
-        ))
-}

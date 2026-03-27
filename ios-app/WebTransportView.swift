@@ -24,10 +24,7 @@ struct WebTransportView: UIViewRepresentable {
         // loadHTMLString avoids the on-device "Could not create a sandbox extension" error
         // that loadFileURL triggers. baseURL makes the page a secure HTTPS origin so the
         // WebTransport JS API is available.
-        let html = Self.buildHTML(
-            relayURL: Configuration.relayURL,
-            fingerprint: Configuration.certFingerprint
-        )
+        let html = Self.buildHTML(relayURL: Configuration.relayURL)
         webView.loadHTMLString(html, baseURL: URL(string: "https://ruh.sunbour.com"))
 
         return webView
@@ -37,18 +34,14 @@ struct WebTransportView: UIViewRepresentable {
 
     // MARK: - HTML
 
-    /// Builds the HTML page with the relay URL and cert fingerprint baked in as JS literals.
-    private static func buildHTML(relayURL: String, fingerprint: String) -> String {
-        // JSON-encode the strings so any special characters are safely escaped.
+    /// Builds the HTML page with the relay URL baked in as a JS literal.
+    private static func buildHTML(relayURL: String) -> String {
         let urlJSON = jsonString(relayURL)
-        let fpJSON  = jsonString(fingerprint)
         return """
         <!DOCTYPE html>
         <html><head><meta charset="utf-8"></head><body><script>
         (async function() {
           const RELAY_URL = \(urlJSON);
-          const FP_HEX   = \(fpJSON);
-          const fpBytes  = new Uint8Array(FP_HEX.split(':').map(h => parseInt(h, 16)));
 
           function toB64(bytes) {
             let s = '';
@@ -58,9 +51,7 @@ struct WebTransportView: UIViewRepresentable {
 
           for (;;) {
             try {
-              const wt = new WebTransport(RELAY_URL, {
-                serverCertificateHashes: [{ algorithm: 'sha-256', value: fpBytes }]
-              });
+              const wt = new WebTransport(RELAY_URL);
               await wt.ready;
               webkit.messageHandlers.status.postMessage('connected');
 

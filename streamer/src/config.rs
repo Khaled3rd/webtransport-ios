@@ -29,7 +29,6 @@ pub struct EncoderConfig {
 pub struct RelayConfig {
     pub url: String,
     pub token: String,
-    pub cert_fingerprint: String,
 }
 
 impl Config {
