@@ -82,7 +82,7 @@ toy_controller.py         Python script — receives move commands via Unix sock
 - Fans every incoming video frame out to all active subscribers in real time
 - Routes commands from each iOS subscriber to the publisher (streamer) with sub ID
 - Routes responses from the streamer back to the originating subscriber
-- Generates a self-signed P-256 TLS certificate on first run; reuses it on restart
+- Uses a CA-signed TLS certificate (Let's Encrypt) for standard trust — no cert pinning required
 - Exposes `GET /health` on TCP port 4434 (JSON status)
 
 ### Prerequisites
@@ -113,15 +113,15 @@ publish_token   = "change-me"       # Bearer token required by the streamer
 max_subscribers = 50                # Maximum simultaneous viewers
 
 [tls]
-cert_path           = "/home/b/.relay/cert.pem"   # Created automatically if missing
-key_path            = "/home/b/.relay/key.pem"    # Created automatically if missing
-cert_validity_days  = 14                           # WebTransport requires ≤ 14 days
+cert_path           = "/home/b/.relay/cert.pem"   # Path to PEM certificate (fullchain)
+key_path            = "/home/b/.relay/key.pem"    # Path to PEM private key
+cert_validity_days  = 14                           # Only used when auto-generating a self-signed cert
 ```
 
-> **TLS note**: WebTransport's `serverCertificateHashes` pinning requires the certificate
-> validity period to be **14 days or less**. The relay generates a fresh cert automatically
-> when none is found at the configured paths. Rotate the cert (and update the iOS app's
-> fingerprint) before it expires.
+> **TLS note**: The relay loads whatever cert is at the configured paths. Point these at
+> your Let's Encrypt `fullchain.pem` and `privkey.pem` for standard CA validation — no
+> cert pinning or app rebuilds needed on renewal. If the files are missing the relay
+> generates a temporary self-signed cert automatically.
 
 ### Run
 
@@ -137,34 +137,31 @@ RUST_LOG=info ./target/release/relay
 RUST_LOG=debug ./target/release/relay   # very noisy
 ```
 
-### Get the TLS fingerprint
+### TLS certificate setup (Let's Encrypt)
 
-The relay prints the SHA-256 fingerprint at startup:
-
-```
-INFO relay: TLS cert fingerprint (SHA-256): DC:76:40:8B:42:7D:...
-```
-
-You need this value in two places:
-1. The iOS app's `Configuration.swift` → `certFingerprint`
-2. The streamer's `config.toml` → `[relay] cert_fingerprint`
-
-To extract it from an existing cert without restarting:
+Copy the Let's Encrypt cert into the relay's cert directory once (requires sudo):
 
 ```bash
-openssl x509 -in ~/.relay/cert.pem -noout -fingerprint -sha256 \
-  | sed 's/.*Fingerprint=//' | tr '[:lower:]' '[:upper:]'
+sudo cp /etc/letsencrypt/live/your-domain/fullchain.pem /home/b/.relay/cert.pem
+sudo cp /etc/letsencrypt/live/your-domain/privkey.pem   /home/b/.relay/key.pem
+sudo chown b:b /home/b/.relay/cert.pem /home/b/.relay/key.pem
 ```
 
-### Rotate the certificate
+Set up a certbot deploy hook so the relay cert is updated automatically on renewal:
 
 ```bash
-rm ~/.relay/cert.pem ~/.relay/key.pem
-./target/release/relay   # generates a new cert on startup
+sudo tee /etc/letsencrypt/renewal-hooks/deploy/relay.sh << 'EOF'
+#!/bin/bash
+cp /etc/letsencrypt/live/your-domain/fullchain.pem /home/b/.relay/cert.pem
+cp /etc/letsencrypt/live/your-domain/privkey.pem   /home/b/.relay/key.pem
+chown b:b /home/b/.relay/cert.pem /home/b/.relay/key.pem
+pkill -HUP relay 2>/dev/null || true
+EOF
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/relay.sh
 ```
 
-Then update `cert_fingerprint` in the streamer's `config.toml` and the iOS app's
-`Configuration.swift`, then rebuild the iOS app.
+With a CA-signed cert in place, no fingerprint configuration is needed anywhere —
+the iOS app and streamer both use standard TLS validation.
 
 ### Health check
 
@@ -255,9 +252,8 @@ bitrate_kbps      = 2000          # Target bitrate in kbps
 keyframe_interval = 30            # IDR frame every N frames (forced via x264 API)
 
 [relay]
-url                 = "https://ruh.sunbour.com:4433/publish"
-token               = "change-me"          # Must match relay's publish_token
-cert_fingerprint    = "DC:76:40:..."       # SHA-256 of relay TLS cert (colon-separated uppercase hex)
+url   = "https://your-relay-host:4433/publish"
+token = "change-me"   # Must match relay's publish_token
 ```
 
 ### Run
@@ -380,7 +376,7 @@ s.sendto(json.dumps({'d': 'u'}).encode(), '/tmp/toy.sock')
 
 ```
 ios-app/
-  Configuration.swift      Relay URL + TLS cert fingerprint
+  Configuration.swift      Relay URL
   WebTransportApp.swift    App entry point (@main)
   ContentView.swift        Root view — video, command panel, D-pad, response toast
   WebTransportView.swift   Hidden WKWebView running the JS WebTransport client
@@ -397,26 +393,19 @@ The only file you need to edit before building:
 
 ```swift
 enum Configuration {
-    static let relayURL        = "https://your-relay-host:4433/watch"
-    static let certFingerprint = "DC:76:40:8B:42:7D:..."  // from relay startup log
+    static let relayURL = "https://your-relay-host:4433/watch"
 }
 ```
 
-`certFingerprint` must be the **colon-separated uppercase SHA-256** of the relay's
-self-signed TLS cert. The relay prints it at startup:
-
-```
-INFO relay: TLS cert fingerprint (SHA-256): DC:76:40:8B:42:7D:...
-```
-
-Update this value (and rebuild the app) every time the relay cert is rotated.
+That's the only value to change. With a CA-signed cert on the relay, standard TLS
+validation applies — no fingerprint, no cert pinning, no app rebuild on cert renewal.
 
 ### Build & run
 
 1. Open `WebTransport.xcodeproj` in Xcode.
 2. Select your iPhone/iPad as the run destination (not a Simulator).
 3. Set your Development Team in **Signing & Capabilities**.
-4. Edit `Configuration.swift` with your relay URL and cert fingerprint.
+4. Edit `Configuration.swift` with your relay URL.
 5. Press **Run** (⌘R).
 
 ### How it works
@@ -459,19 +448,17 @@ No `VTDecompressionSession` is used. `AVSampleBufferDisplayLayer` accepts AVCC H
 # 1. Start the relay (Riyadh server)
 RUST_LOG=info ./relay/target/release/relay
 
-# 2. Note the fingerprint printed at startup, update configs if rotated
-
-# 3. Start the toy controller (camera machine) — optional, before streamer
+# 2. Start the toy controller (camera machine) — optional, before streamer
 python3 ~/toy_controller.py
 
-# 4. Start the streamer (camera machine)
+# 3. Start the streamer (camera machine)
 RUST_LOG=info ./streamer/target/release/streamer
 
-# 5. Verify both are connected
+# 4. Verify both are connected
 curl http://<relay-host>:4434/health
 # → {"publisher_connected":true,"status":"ok","subscribers":0}
 
-# 6. Open the iOS app — video appears within 1-2 seconds
+# 5. Open the iOS app — video appears within 1-2 seconds
 #    Tap the slider icon (bottom-right) to open the command panel
 #    Hold a D-pad arrow to drive; release to stop
 ```
@@ -487,8 +474,8 @@ curl http://<relay-host>:4434/health
 | No video on iOS, relay shows subscriber | Old JS still cached in WKWebView | Clean build + reinstall iOS app |
 | D-pad does nothing | `toy_controller.py` not running | Start it before the streamer |
 | D-pad does nothing, controller is running | Bidi stream not opened | Check relay log for `Subscriber N bidi command stream open` |
-| Streamer exits immediately | Token mismatch or relay cert fingerprint wrong | Check `config.toml` on both sides |
-| Cert expired (>14 days) | WebTransport rejects expired cert | Rotate cert, update fingerprint |
+| Streamer exits immediately | Token mismatch or relay unreachable | Check `token` in `config.toml` on both sides |
+| TLS handshake fails | Relay using self-signed cert, iOS expects CA cert | Copy Let's Encrypt cert to `~/.relay/` and restart relay |
 | Low FPS (< 15 fps) | High RTT + QUIC flow control | Lower `bitrate_kbps`; reduce resolution |
 | `Capture buffer full` warnings | Encoder faster than network | Normal under congestion; frames are dropped gracefully |
 
