@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebTransport Viewer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #000; color: #fff;
+  font-family: system-ui, -apple-system, sans-serif;
+  display: flex; flex-direction: column; align-items: center;
+  min-height: 100vh;
+}
+#status-bar {
+  width: 100%; padding: 6px 16px;
+  background: #111; font-size: 13px; color: #aaa;
+  display: flex; align-items: center; gap: 8px;
+}
+#status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #555; flex-shrink: 0;
+}
+#status-dot.connected { background: #30d158; }
+#status-dot.error     { background: #ff453a; }
+
+canvas#video {
+  width: 100%; max-height: 60vh;
+  background: #111; display: block;
+  object-fit: contain;
+}
+
+#controls {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 14px; padding: 16px; width: 100%; max-width: 480px;
+}
+
+.section-label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+button {
+  background: #2c2c2e; color: #fff;
+  border: 1px solid #3a3a3c; border-radius: 10px;
+  padding: 10px 18px; font-size: 14px; cursor: pointer;
+  touch-action: manipulation; user-select: none;
+  transition: background 0.1s;
+}
+button:hover  { background: #3a3a3c; }
+button:active { background: #48484a; }
+button.active { background: #0a84ff; border-color: #0a84ff; }
+button.cmd-btn { min-width: 160px; }
+
+/* D-pad grid */
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 54px);
+  grid-template-rows:    repeat(3, 54px);
+  gap: 4px;
+}
+.dpad button {
+  width: 54px; height: 54px; padding: 0;
+  font-size: 22px; border-radius: 12px;
+}
+.dpad .center {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: #555; background: #1c1c1e;
+  border: 1px solid #2c2c2e; border-radius: 12px;
+}
+.dpad .spacer { visibility: hidden; }
+
+/* Toast */
+#toast {
+  position: fixed; bottom: 36px;
+  left: 50%; transform: translateX(-50%);
+  background: rgba(28,28,30,0.92); color: #fff;
+  padding: 10px 22px; border-radius: 20px;
+  font-size: 14px; opacity: 0;
+  transition: opacity 0.25s;
+  pointer-events: none;
+  max-width: 90vw; text-align: center;
+  white-space: pre-wrap; word-break: break-all;
+}
+#toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="status-bar">
+  <div id="status-dot"></div>
+  <span id="status-text">Connecting…</span>
+</div>
+
+<canvas id="video" width="1280" height="720"></canvas>
+
+<div id="controls">
+
+  <div style="display:flex; flex-direction:column; align-items:center; gap:8px; width:100%">
+    <span class="section-label">Encoder</span>
+    <div class="btn-row">
+      <button class="cmd-btn" id="btn-keyframe">⌘ Force Keyframe</button>
+    </div>
+    <div class="btn-row" id="bitrate-btns">
+      <button onclick="setBitrate(500,this)">500 kbps</button>
+      <button onclick="setBitrate(1000,this)">1000 kbps</button>
+      <button class="active" onclick="setBitrate(2000,this)">2000 kbps</button>
+      <button onclick="setBitrate(4000,this)">4000 kbps</button>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; align-items:center; gap:8px">
+    <span class="section-label">Toy Control</span>
+    <div class="dpad">
+      <div class="spacer"></div>
+      <button id="dp-up"    data-dir="up"    onpointerdown="dpadStart('up')"    onpointerup="dpadStop()" onpointercancel="dpadStop()" onpointerleave="dpadStop()">▲</button>
+      <div class="spacer"></div>
+      <button id="dp-left"  data-dir="left"  onpointerdown="dpadStart('left')"  onpointerup="dpadStop()" onpointercancel="dpadStop()" onpointerleave="dpadStop()">◀</button>
+      <div class="center">D-pad</div>
+      <button id="dp-right" data-dir="right" onpointerdown="dpadStart('right')" onpointerup="dpadStop()" onpointercancel="dpadStop()" onpointerleave="dpadStop()">▶</button>
+      <div class="spacer"></div>
+      <button id="dp-down"  data-dir="down"  onpointerdown="dpadStart('down')"  onpointerup="dpadStop()" onpointercancel="dpadStop()" onpointerleave="dpadStop()">▼</button>
+      <div class="spacer"></div>
+    </div>
+    <div style="font-size:12px; color:#555">Arrow keys also work</div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+const RELAY_URL = 'https://ruh.sunbour.com:4433/watch';
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+const canvas  = document.getElementById('video');
+const ctx     = canvas.getContext('2d');
+const dot     = document.getElementById('status-dot');
+const statusEl = document.getElementById('status-text');
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  dot.className = cls || '';
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ── Commands ──────────────────────────────────────────────────────────────────
+let cmdWriter = null;
+
+async function sendCmd(obj) {
+  if (!cmdWriter) return;
+  try {
+    const enc = new TextEncoder().encode(JSON.stringify(obj));
+    const buf = new Uint8Array(4 + enc.length);
+    new DataView(buf.buffer).setUint32(0, enc.length, false);
+    buf.set(enc, 4);
+    await cmdWriter.write(buf);
+  } catch (e) {
+    console.warn('sendCmd error:', e);
+  }
+}
+
+document.getElementById('btn-keyframe').addEventListener('click', () => sendCmd({cmd: 'force_keyframe'}));
+
+function setBitrate(kbps, btn) {
+  sendCmd({cmd: 'set_bitrate', kbps});
+  document.querySelectorAll('#bitrate-btns button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+// ── D-pad ─────────────────────────────────────────────────────────────────────
+let currentDir = null;
+
+function dpadStart(dir) {
+  if (currentDir === dir) return;
+  currentDir = dir;
+  sendCmd({cmd: 'move_start', dir});
+  document.querySelectorAll('.dpad button[data-dir]').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById('dp-' + dir);
+  if (btn) btn.classList.add('active');
+}
+
+function dpadStop() {
+  if (!currentDir) return;
+  sendCmd({cmd: 'move_stop'});
+  currentDir = null;
+  document.querySelectorAll('.dpad button[data-dir]').forEach(b => b.classList.remove('active'));
+}
+
+const KEY_DIR = {ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right'};
+document.addEventListener('keydown', e => {
+  const dir = KEY_DIR[e.key];
+  if (dir && !e.repeat) { e.preventDefault(); dpadStart(dir); }
+});
+document.addEventListener('keyup', e => {
+  if (KEY_DIR[e.key]) { e.preventDefault(); dpadStop(); }
+});
+
+// ── VideoDecoder ──────────────────────────────────────────────────────────────
+let decoder = null;
+let codecStr = null;
+let frameTs  = 0;
+
+function toHex2(n) { return n.toString(16).padStart(2, '0'); }
+
+// Parse Annex-B bytestream; return array of NAL unit payloads (start codes stripped).
+function parseNalUnits(data) {
+  const nals = [];
+  let i = 0, start = -1;
+  while (i < data.length) {
+    // Detect 3- or 4-byte start code
+    const sc4 = i + 3 < data.length && data[i]===0 && data[i+1]===0 && data[i+2]===0 && data[i+3]===1;
+    const sc3 = !sc4 && i + 2 < data.length && data[i]===0 && data[i+1]===0 && data[i+2]===1;
+    if (sc4 || sc3) {
+      if (start >= 0) nals.push(data.subarray(start, i));
+      i += sc4 ? 4 : 3;
+      start = i;
+    } else {
+      i++;
+    }
+  }
+  if (start >= 0 && start < data.length) nals.push(data.subarray(start));
+  return nals;
+}
+
+function initDecoder(codec) {
+  if (decoder) { try { decoder.close(); } catch (_) {} }
+  decoder = new VideoDecoder({
+    output: frame => {
+      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+        canvas.width  = frame.displayWidth;
+        canvas.height = frame.displayHeight;
+      }
+      ctx.drawImage(frame, 0, 0);
+      frame.close();
+    },
+    error: e => console.warn('VideoDecoder error:', e),
+  });
+  decoder.configure({ codec, optimizeForLatency: true });
+  codecStr = codec;
+}
+
+function decodeFrame(annexB, isKeyframe) {
+  // On keyframes, extract codec from SPS if not yet known or decoder closed.
+  if (isKeyframe) {
+    const nals = parseNalUnits(annexB);
+    const sps  = nals.find(n => n.length >= 4 && (n[0] & 0x1f) === 7);
+    if (sps) {
+      const newCodec = `avc1.${toHex2(sps[1])}${toHex2(sps[2])}${toHex2(sps[3])}`;
+      if (!decoder || decoder.state !== 'configured' || newCodec !== codecStr) {
+        initDecoder(newCodec);
+      }
+    }
+  }
+
+  if (!decoder || decoder.state !== 'configured') return; // waiting for first keyframe
+
+  try {
+    decoder.decode(new EncodedVideoChunk({
+      type: isKeyframe ? 'key' : 'delta',
+      timestamp: frameTs,
+      data: annexB,
+    }));
+    frameTs += 33333; // ~30 fps in microseconds; display layer handles timing
+  } catch (e) {
+    console.warn('decode error:', e);
+  }
+}
+
+// ── readN helper ──────────────────────────────────────────────────────────────
+function makeStreamReader(stream) {
+  const r = stream.getReader();
+  let buf = new Uint8Array(0);
+  return {
+    async readN(n) {
+      while (buf.byteLength < n) {
+        const { value, done } = await r.read();
+        if (done) return null;
+        const m = new Uint8Array(buf.byteLength + value.byteLength);
+        m.set(buf); m.set(value, buf.byteLength);
+        buf = m;
+      }
+      const out = buf.slice(0, n);
+      buf = buf.slice(n);
+      return out;
+    },
+  };
+}
+
+// ── Main connect loop ─────────────────────────────────────────────────────────
+async function main() {
+  for (;;) {
+    setStatus('Connecting…');
+    cmdWriter = null;
+    codecStr  = null;
+    frameTs   = 0;
+    if (decoder) { try { decoder.close(); } catch (_) {} decoder = null; }
+
+    try {
+      const wt = new WebTransport(RELAY_URL);
+      await wt.ready;
+      setStatus('Connected', 'connected');
+
+      // Accept the bidi command stream the relay opens for us (server-initiated).
+      // This arrives shortly after the video stream, so use a short timeout.
+      try {
+        const bidiRdr = wt.incomingBidirectionalStreams.getReader();
+        const bidiPromise = bidiRdr.read();
+        const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('bidi timeout')), 4000));
+        const { value: bidi, done: bidiDone } = await Promise.race([bidiPromise, timeout]);
+        if (!bidiDone && bidi) {
+          cmdWriter = bidi.writable.getWriter();
+          // Read responses from relay in background
+          (async () => {
+            const resp = makeStreamReader(bidi.readable);
+            for (;;) {
+              const lb = await resp.readN(4); if (!lb) break;
+              const len = (lb[0]<<24)|(lb[1]<<16)|(lb[2]<<8)|lb[3];
+              if (len === 0 || len > 1_000_000) break;
+              const rb = await resp.readN(len); if (!rb) break;
+              showToast(new TextDecoder().decode(rb));
+            }
+          })();
+        }
+      } catch (bidiErr) {
+        console.warn('Bidi stream unavailable:', bidiErr.message);
+      }
+
+      // Accept the video uni stream.
+      const streamRdr = wt.incomingUnidirectionalStreams.getReader();
+      const { value: stream, done: sd } = await streamRdr.read();
+      if (sd || !stream) {
+        setStatus('No video stream', 'error');
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+
+      const vid = makeStreamReader(stream);
+      for (;;) {
+        // [4B length][1B flags][Annex-B NALs]
+        const lb = await vid.readN(4); if (!lb) break;
+        const len = (lb[0]<<24)|(lb[1]<<16)|(lb[2]<<8)|lb[3];
+        if (len < 1 || len > 4_000_000) break;
+        const fb = await vid.readN(len); if (!fb) break;
+        const isKeyframe = (fb[0] & 0x01) !== 0;
+        decodeFrame(fb.subarray(1), isKeyframe);
+      }
+
+      setStatus('Disconnected');
+    } catch (e) {
+      setStatus('Error: ' + e.message, 'error');
+      console.error(e);
+    }
+
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
+// Check for WebTransport + WebCodecs support
+if (typeof WebTransport === 'undefined' || typeof VideoDecoder === 'undefined') {
+  setStatus('WebTransport / WebCodecs not supported — use Chrome 94+', 'error');
+} else {
+  main();
+}
+</script>
+
+</body>
+</html>
