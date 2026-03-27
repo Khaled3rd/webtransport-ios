@@ -8,7 +8,8 @@ mod tls;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use bytes::Bytes;
+use tokio::sync::broadcast;
 use wtransport::{Endpoint, ServerConfig, Identity};
 use axum::{routing::get, Router, Json};
 use serde_json::json;
@@ -22,13 +23,13 @@ use crate::subscriber::{handle_subscriber, SubscriberRegistry};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install crypto provider");
-
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install crypto provider");
 
     let config_path = parse_config_arg();
 
@@ -60,12 +61,20 @@ fn parse_config_arg() -> String {
 
 async fn run(config: Config) -> Result<(), RelayError> {
     // Setup TLS
-    let _tls = tls::setup_tls(&config.tls)?;
+    let tls = tls::setup_tls(&config.tls)?;
 
     // Create shared state
     let broadcast_tx = create_fanout();
     let publisher_state = Arc::new(PublisherState::new());
     let subscriber_registry = Arc::new(SubscriberRegistry::new());
+
+    // Command/response broadcast channels for the bidirectional command channel.
+    // cmd_bcast: iOS subscriber → publisher (streamer), carries (sub_id, cmd_bytes)
+    // resp_bcast: publisher (streamer) → specific iOS subscriber, carries (sub_id, resp_bytes)
+    let (cmd_bcast_tx, _) = broadcast::channel::<(u64, Bytes)>(64);
+    let cmd_bcast_tx = Arc::new(cmd_bcast_tx);
+    let (resp_bcast_tx, _) = broadcast::channel::<(u64, Bytes)>(64);
+    let resp_bcast_tx = Arc::new(resp_bcast_tx);
 
     let publisher_connected = publisher_state.connected.clone();
     let sub_registry_health = subscriber_registry.clone();
@@ -123,16 +132,17 @@ async fn run(config: Config) -> Result<(), RelayError> {
     tracing::info!("WebTransport relay listening on {}", config.server.bind);
 
     loop {
-        // accept() returns IncomingSession directly (not Option)
         let incoming = endpoint.accept().await;
 
         let config = config.clone();
         let broadcast_tx = broadcast_tx.clone();
         let publisher_connected = publisher_connected.clone();
         let subscriber_registry = subscriber_registry.clone();
+        let cmd_bcast_tx = cmd_bcast_tx.clone();
+        let resp_bcast_tx = resp_bcast_tx.clone();
 
         tokio::spawn(async move {
-            let session_request: wtransport::endpoint::SessionRequest = match incoming.await {
+            let session_request = match incoming.await {
                 Ok(req) => req,
                 Err(e) => {
                     tracing::debug!("Failed to receive session request: {e}");
@@ -141,17 +151,17 @@ async fn run(config: Config) -> Result<(), RelayError> {
             };
 
             let path = session_request.path().to_string();
-            // headers() returns &HashMap<String, String>
             let auth_header = session_request
                 .headers()
                 .get("authorization")
-                .map(|s| s.as_str())
+                .map(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
 
             tracing::debug!("Incoming session: path={path}, auth_len={}", auth_header.len());
 
             if path == config.server.publish_path {
+                // Check authorization
                 let expected = format!("Bearer {}", config.server.publish_token);
                 if auth_header != expected {
                     tracing::warn!("Publisher rejected: invalid token");
@@ -159,6 +169,7 @@ async fn run(config: Config) -> Result<(), RelayError> {
                     return;
                 }
 
+                // Check if publisher already connected
                 {
                     let connected = publisher_connected.lock().await;
                     if *connected {
@@ -181,6 +192,8 @@ async fn run(config: Config) -> Result<(), RelayError> {
                     broadcast_tx,
                     publisher_connected,
                     config.server.publish_token,
+                    cmd_bcast_tx,
+                    resp_bcast_tx,
                 ).await {
                     tracing::warn!("Publisher error: {e}");
                 }
@@ -206,6 +219,8 @@ async fn run(config: Config) -> Result<(), RelayError> {
                     broadcast_tx,
                     subscriber_registry,
                     config.server.max_subscribers,
+                    cmd_bcast_tx,
+                    resp_bcast_tx,
                 ).await {
                     tracing::debug!("Subscriber error: {e}");
                 }

@@ -4,17 +4,49 @@ use crate::capture::{CapturedFrame, PixelFormat};
 use crate::config::EncoderConfig;
 use crate::error::StreamerError;
 
-pub struct NalUnit {
-    pub is_keyframe: bool,
-    pub data: Bytes,
+#[derive(Clone, Copy, Debug)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+    Stop,
 }
 
-/// Wraps x264::Encoder with pts counter and forced-IDR tracking.
+pub enum EncoderCommand {
+    ForceKeyframe,
+    SetBitrate(u32),
+    Move(Direction),
+}
+
 pub struct VideoEncoder {
     enc: x264::Encoder,
     pts: i64,
     frame_count: u32,
     keyframe_interval: u32,
+    pub force_idr_next: bool,
+    pub pending_bitrate: Option<u32>,
+}
+
+impl VideoEncoder {
+    pub fn apply_command(&mut self, cmd: EncoderCommand) -> &'static str {
+        match cmd {
+            EncoderCommand::ForceKeyframe => {
+                self.force_idr_next = true;
+                "force_keyframe"
+            }
+            EncoderCommand::SetBitrate(kbps) => {
+                self.pending_bitrate = Some(kbps);
+                "set_bitrate"
+            }
+            EncoderCommand::Move(_) => "move", // routed to toy controller, not encoder
+        }
+    }
+}
+
+pub struct NalUnit {
+    pub is_keyframe: bool,
+    pub data: Bytes,
 }
 
 pub fn create_encoder(config: &EncoderConfig, width: u32, height: u32) -> Result<VideoEncoder, StreamerError> {
@@ -27,7 +59,14 @@ pub fn create_encoder(config: &EncoderConfig, width: u32, height: u32) -> Result
         .build(Colorspace::I420, width as i32, height as i32)
         .map_err(|_| StreamerError::Encoder("Failed to create encoder".into()))?;
 
-    Ok(VideoEncoder { enc, pts: 0, frame_count: 0, keyframe_interval: config.keyframe_interval })
+    Ok(VideoEncoder {
+        enc,
+        pts: 0,
+        frame_count: 0,
+        keyframe_interval: config.keyframe_interval,
+        force_idr_next: false,
+        pending_bitrate: None,
+    })
 }
 
 pub fn encode_frame(
@@ -37,6 +76,26 @@ pub fn encode_frame(
     width: u32,
     height: u32,
 ) -> Result<Vec<NalUnit>, StreamerError> {
+    // Apply pending bitrate change: rebuild encoder with new bitrate.
+    if let Some(kbps) = enc.pending_bitrate.take() {
+        match Setup::preset(Preset::Ultrafast, Tune::None, false, true)
+            .bitrate(kbps as i32)
+            .keyint_max(enc.keyframe_interval as i32)
+            .bframes(0)
+            .repeat_headers(true)
+            .baseline()
+            .build(Colorspace::I420, width as i32, height as i32)
+        {
+            Ok(new_enc) => {
+                enc.enc = new_enc;
+                enc.pts = 0;
+                enc.frame_count = 0;
+                tracing::info!("Encoder rebuilt with bitrate {kbps} kbps");
+            }
+            Err(_) => tracing::warn!("Failed to rebuild encoder for bitrate change"),
+        }
+    }
+
     let yuv = match frame.format {
         PixelFormat::Yuyv => yuyv_to_yuv420p(&frame.data, width, height)?,
         PixelFormat::Mjpeg => mjpeg_to_yuv420p(&frame.data)?,
@@ -54,7 +113,11 @@ pub fn encode_frame(
     );
 
     let pts = enc.pts;
-    let force_idr = enc.frame_count % enc.keyframe_interval == 0;
+    let force_idr = enc.force_idr_next || enc.frame_count % enc.keyframe_interval == 0;
+    if enc.force_idr_next {
+        enc.force_idr_next = false;
+        tracing::info!("IDR forced");
+    }
 
     let (nals, _) = if force_idr {
         enc.enc.encode_idr(pts, image)
@@ -69,8 +132,7 @@ pub fn encode_frame(
     for i in 0..nals.len() {
         let unit = nals.unit(i);
         let payload: &[u8] = unit.as_ref();
-        // payload is Annex-B: [0x00 0x00 0x00 0x01][NAL header][...data...]
-        // NAL unit type = bits 0-4 of byte 4
+        // NAL unit type = bits 0-4 of byte 4 (Annex-B: [0x00 0x00 0x00 0x01][nal header])
         let is_keyframe = payload.len() > 4 && (payload[4] & 0x1F) == 5;
         result.push(NalUnit {
             is_keyframe,

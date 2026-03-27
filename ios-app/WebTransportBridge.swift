@@ -9,6 +9,8 @@ final class WebTransportBridge: NSObject, WKScriptMessageHandler {
     private(set) var isConnected = false
     private var frameCount = 0
     var onConnectionChanged: @MainActor (Bool) -> Void = { _ in }
+    var onCommandResponse: @MainActor (String) -> Void = { _ in }
+    weak var webView: WKWebView?
 
     init(decoder: H264Decoder) {
         self.decoder = decoder
@@ -39,8 +41,23 @@ final class WebTransportBridge: NSObject, WKScriptMessageHandler {
                 onConnectionChanged(connected)
             }
 
+        case "commandResponse":
+            let json = message.body as? String ?? ""
+            print("[WT] commandResponse:", json)
+            onCommandResponse(json)
+
         default:
             break
         }
+    }
+
+    // MARK: - Commands
+
+    /// Send a JSON command string via the JS bidi stream.
+    func sendCommand(_ json: String) {
+        let safe = json
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        webView?.evaluateJavaScript("window.sendCommand && window.sendCommand('\(safe)')")
     }
 }

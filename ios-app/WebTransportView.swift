@@ -9,6 +9,7 @@ struct WebTransportView: UIViewRepresentable {
         let contentController = WKUserContentController()
         contentController.add(bridge, name: "frame")
         contentController.add(bridge, name: "status")
+        contentController.add(bridge, name: "commandResponse")
 
         // No WKUserScript injection: ENABLE_USER_SCRIPT_SANDBOXING=YES isolates injected
         // scripts into a separate JS world, so window.* values set there are invisible to
@@ -18,6 +19,7 @@ struct WebTransportView: UIViewRepresentable {
         config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
+        bridge.webView = webView
 
         // loadHTMLString avoids the on-device "Could not create a sandbox extension" error
         // that loadFileURL triggers. baseURL makes the page a secure HTTPS origin so the
@@ -61,6 +63,49 @@ struct WebTransportView: UIViewRepresentable {
               });
               await wt.ready;
               webkit.messageHandlers.status.postMessage('connected');
+
+              // Accept the bidi command stream opened by the relay (server-initiated).
+              let cmdWriter = null;
+              try {
+                const bidiReader = wt.incomingBidirectionalStreams.getReader();
+                const { value: bidi, done: bidiDone } = await bidiReader.read();
+                if (bidiDone || !bidi) throw new Error('No bidi stream from relay');
+                cmdWriter = bidi.writable.getWriter();
+                window.sendCommand = async function(jsonStr) {
+                  const enc = new TextEncoder().encode(jsonStr);
+                  const buf = new Uint8Array(4 + enc.length);
+                  new DataView(buf.buffer).setUint32(0, enc.length, false);
+                  buf.set(enc, 4);
+                  await cmdWriter.write(buf);
+                };
+                // Read responses from relay in background.
+                (async () => {
+                  const rdr = bidi.readable.getReader();
+                  let pend = new Uint8Array(0);
+                  async function readNR(n) {
+                    while (pend.byteLength < n) {
+                      const { value, done } = await rdr.read();
+                      if (done) return null;
+                      const m = new Uint8Array(pend.byteLength + value.byteLength);
+                      m.set(pend); m.set(value, pend.byteLength);
+                      pend = m;
+                    }
+                    const out = pend.slice(0, n);
+                    pend = pend.slice(n);
+                    return out;
+                  }
+                  for (;;) {
+                    const lb = await readNR(4); if (!lb) break;
+                    const len = (lb[0]<<24)|(lb[1]<<16)|(lb[2]<<8)|lb[3];
+                    const rb = await readNR(len); if (!rb) break;
+                    webkit.messageHandlers.commandResponse.postMessage(
+                      new TextDecoder().decode(rb)
+                    );
+                  }
+                })();
+              } catch (bidiErr) {
+                console.warn('Bidi command stream unavailable:', bidiErr);
+              }
 
               // Relay opens exactly one persistent uni stream per subscriber.
               // Frames are length-prefixed: [4B length BE][1B flags][Annex-B NALs].
