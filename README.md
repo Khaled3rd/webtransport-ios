@@ -6,6 +6,7 @@ bidirectional command channel for remote control.
 ```
 Camera (Linux)  →  Streamer  →  Relay  →  iOS App
   lviv_laptop       ~/streamer    ruh.sunbour.com:4433    iPhone / iPad
+  Raspberry Pi                                            PC Browser (viewer.html)
                         ↑                    ↓
                    toy_controller.py  ←  D-pad commands
 ```
@@ -68,6 +69,7 @@ WebTransport.xcodeproj/   Xcode project file
 relay/                    Rust WebTransport relay server (wtransport 0.4, vendored)
 streamer/                 Rust V4L2 → x264 → WebTransport streamer (vendored x264 + wtransport)
 toy_controller.py         Python script — receives move commands via Unix socket, drives motors
+viewer.html               Browser viewer — WebTransport + WebCodecs H.264, D-pad, encoder controls
 ```
 
 ---
@@ -292,6 +294,259 @@ pkill -9 -f "target/release/streamer"
 
 ---
 
+## Running the Streamer on Raspberry Pi
+
+The streamer compiles and runs on Raspberry Pi. Pick a build path below based on
+what is most convenient, then tune the config for your board.
+
+### Platform compatibility
+
+| Board | CPU | RAM | Recommended OS | Rust target |
+|---|---|---|---|---|
+| RPi 3 B / 3 B+ v1.2 | Cortex-A53 | 1 GB | Pi OS 64-bit (Bookworm) | `aarch64-unknown-linux-gnu` |
+| RPi 4 B | Cortex-A72 | 2–8 GB | Pi OS 64-bit (Bookworm) | `aarch64-unknown-linux-gnu` |
+
+Use the **64-bit OS image** on both boards — same Rust target for both, x264 gets
+proper ARM64 NEON SIMD, and `ring` (used by rustls) has better support on `aarch64`
+than on 32-bit `armv7`.
+
+---
+
+### Option A — Build directly on the Pi (simplest, most reliable)
+
+Works on both boards. No toolchain setup on your dev machine. Compile time is
+~10 min on Pi 4 and ~30–40 min on Pi 3.
+
+```bash
+# 1. Install build dependencies
+sudo apt update
+sudo apt install -y clang libclang-dev cmake make git
+
+# 2. Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# 3. Copy the streamer source to the Pi (from your dev machine)
+rsync -av ios/streamer/ pi@raspberrypi:~/streamer/
+# — or use scp, git clone, USB stick, etc.
+
+# 4. Build  (CC=clang avoids a GCC memcmp issue in ring's C code)
+cd ~/streamer
+CC=clang cargo build --release
+
+# 5. Run
+RUST_LOG=info ./target/release/streamer config.toml
+```
+
+> `nasm` is **not** required on ARM. x264 uses ARM assembly via `gas`, not NASM.
+
+---
+
+### Option B — Cross-compile with `cross` (faster compile, runs on your dev machine)
+
+`cross` uses Docker to provide the correct ARM64 C toolchain. Run this on your
+Linux x86\_64 or macOS machine.
+
+```bash
+# 1. Install Docker Desktop (macOS) or Docker Engine (Linux)
+
+# 2. Install cross
+cargo install cross
+
+# 3. Add the ARM64 Rust target
+rustup target add aarch64-unknown-linux-gnu
+
+# 4. Build from inside ios/streamer/
+cd ios/streamer
+cross build --release --target aarch64-unknown-linux-gnu
+
+# 5. Copy binary to the Pi
+scp target/aarch64-unknown-linux-gnu/release/streamer pi@raspberrypi:~/
+```
+
+> **If cross fails** (common with vendored crates + ring on some setups): fall back to
+> Option A. The native build on Pi is fully reliable.
+
+For 32-bit Pi OS (armv7, not recommended):
+
+```bash
+rustup target add armv7-unknown-linux-gnueabihf
+cross build --release --target armv7-unknown-linux-gnueabihf
+```
+
+---
+
+### Option C — Cross-compile from macOS using `zig cc` (no Docker needed)
+
+`zig` acts as a drop-in ARM64 C cross-compiler without installing a full GNU toolchain.
+
+```bash
+# 1. Install zig and add the Rust ARM64 target
+brew install zig llvm
+rustup target add aarch64-unknown-linux-gnu
+
+# 2. Create a wrapper script that zig uses as the C cross-compiler
+cat > /usr/local/bin/zig-aarch64-cc << 'EOF'
+#!/bin/sh
+exec zig cc -target aarch64-linux-gnu "$@"
+EOF
+chmod +x /usr/local/bin/zig-aarch64-cc
+
+# 3. Tell Cargo to use it — create (or edit) ios/streamer/.cargo/config.toml
+mkdir -p ios/streamer/.cargo
+cat > ios/streamer/.cargo/config.toml << 'EOF'
+[target.aarch64-unknown-linux-gnu]
+linker = "/usr/local/bin/zig-aarch64-cc"
+EOF
+
+# 4. Build
+cd ios/streamer
+CC="/usr/local/bin/zig-aarch64-cc" \
+CXX="zig c++ -target aarch64-linux-gnu" \
+AR="$(brew --prefix llvm)/bin/llvm-ar" \
+cargo build --release --target aarch64-unknown-linux-gnu
+
+# 5. Copy to Pi
+scp target/aarch64-unknown-linux-gnu/release/streamer pi@raspberrypi:~/
+```
+
+> `zig cc` can occasionally fail on complex C code in `ring` or `x264-sys`. If it does,
+> use Option A or B.
+
+---
+
+### Configuration per board
+
+**Raspberry Pi 3 B — reduce resolution and fps**
+
+The encoder is hardcoded to `Preset::Ultrafast`, which is already the fastest x264 mode.
+At 480p / 15 fps, CPU usage is roughly 60–80% of one core.
+
+```toml
+[camera]
+device        = "/dev/video0"
+width         = 640
+height        = 480
+fps           = 15
+pixel_format  = "MJPEG"      # MJPEG reduces USB bandwidth vs YUYV
+
+[encoder]
+profile           = "baseline"
+tune              = "zerolatency"
+bitrate_kbps      = 800
+keyframe_interval = 15        # match fps
+
+[relay]
+url   = "https://your-relay-host:4433/publish"
+token = "change-me"
+```
+
+**Raspberry Pi 4 B — 720p capable**
+
+```toml
+[camera]
+device        = "/dev/video0"
+width         = 1280
+height        = 720
+fps           = 30
+pixel_format  = "MJPEG"
+
+[encoder]
+profile           = "baseline"
+tune              = "zerolatency"
+bitrate_kbps      = 2000
+keyframe_interval = 30
+
+[relay]
+url   = "https://your-relay-host:4433/publish"
+token = "change-me"
+```
+
+---
+
+### Camera options on Pi
+
+**USB webcam** — plug in and it appears at `/dev/video0`. Use MJPEG to reduce USB
+bandwidth (YUYV at 720p / 30fps saturates USB 2.0):
+
+```bash
+v4l2-ctl --list-devices                  # show all V4L2 devices
+v4l2-ctl -d /dev/video0 --list-formats-ext  # show supported formats / resolutions
+```
+
+**Pi Camera Module v1 / v2** — must be enabled before it appears as a V4L2 device:
+
+```bash
+# Pi OS Bullseye — enable Legacy Camera in raspi-config
+sudo raspi-config
+# → Interface Options → Legacy Camera → Enable
+# Reboot; camera appears at /dev/video0
+
+# Pi OS Bookworm — Legacy Camera is removed; use libcamera-vid + v4l2loopback instead:
+sudo apt install -y v4l2loopback-dkms
+sudo modprobe v4l2loopback video_nr=10
+libcamera-vid --width 640 --height 480 --framerate 15 \
+              --codec yuv420 -t 0 --output - \
+              | ffmpeg -f rawvideo -pix_fmt yuv420p -s 640x480 -r 15 -i - \
+                       -f v4l2 /dev/video10
+# Then set device = "/dev/video10" in config.toml, pixel_format = "YUYV"
+```
+
+---
+
+### Run as a systemd service on Pi
+
+```ini
+# /etc/systemd/system/streamer.service
+[Unit]
+Description=WebTransport Streamer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/streamer
+ExecStart=/home/pi/streamer/target/release/streamer --config /home/pi/streamer/config.toml
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now streamer
+sudo journalctl -u streamer -f
+```
+
+---
+
+### Advanced: Hardware H.264 encoder (Raspberry Pi 4 only)
+
+RPi 4 exposes a hardware H.264 encoder via the V4L2 memory-to-memory (M2M) API at
+`/dev/video11` (`bcm2835-codec`). Hardware encoding uses ~5% CPU versus ~60% for x264
+at 720p, and produces the same Annex-B output format the relay already expects.
+
+**The current codebase uses x264 (software) on all platforms.** Switching to the
+hardware encoder requires replacing `encoder.rs` with V4L2 M2M API calls:
+
+1. Open `/dev/video11` as a V4L2 M2M device.
+2. Set **output** format: `V4L2_PIX_FMT_YUV420` at the desired resolution.
+3. Set **capture** format: `V4L2_PIX_FMT_H264`.
+4. Set bitrate control via `V4L2_CID_MPEG_VIDEO_BITRATE` and profile via
+   `V4L2_CID_MPEG_VIDEO_H264_PROFILE`.
+5. Call `VIDIOC_STREAMON` on both queues; feed YUV frames to the output queue;
+   read H.264 NAL units from the capture queue.
+6. Detect keyframes from `V4L2_BUF_FLAG_KEYFRAME` on capture buffers.
+
+The `v4l` crate already in `Cargo.toml` covers capture, but V4L2 M2M encoding needs
+either direct `ioctl` calls or a dedicated crate. This is a significant rewrite and
+is not yet implemented.
+
+---
+
 ## Toy Controller
 
 `toy_controller.py` is a Python script that runs on the same machine as the streamer
@@ -442,6 +697,65 @@ No `VTDecompressionSession` is used. `AVSampleBufferDisplayLayer` accepts AVCC H
 
 ---
 
+## Browser Viewer (`viewer.html`)
+
+A self-contained HTML page that mirrors the iOS app for use from any desktop browser.
+No install required — open the file directly.
+
+### Requirements
+
+| Browser | Minimum version |
+|---------|----------------|
+| Chrome / Chromium | 94+ (WebTransport + WebCodecs) |
+| Edge | 94+ |
+| Firefox | Not supported (WebTransport is behind a flag; WebCodecs partial) |
+| Safari | Not supported |
+
+### Usage
+
+Open `viewer.html` directly in Chrome:
+
+```
+File → Open File → viewer.html
+```
+
+Or serve it over HTTPS (required if you change the relay URL to an HTTP origin):
+
+```bash
+# Python quick server (HTTP is fine for localhost)
+python3 -m http.server 8080
+# → open http://localhost:8080/viewer.html
+```
+
+### What it does
+
+- Connects to the relay's `/watch` endpoint over WebTransport (no cert pinning —
+  Let's Encrypt CA cert is trusted by the browser natively).
+- Accepts the relay's server-initiated bidirectional stream for commands/responses
+  (same `incomingBidirectionalStreams` pattern as the iOS app).
+- Accepts the relay's unidirectional video stream; parses `[4B len][1B flags][Annex-B NALs]`.
+- Decodes H.264 in real time using the **WebCodecs `VideoDecoder` API** with Annex-B
+  input; no plugin or WASM required. Codec string is parsed from the SPS NAL on the
+  first keyframe.
+- Renders decoded frames to a `<canvas>` element; auto-resizes on the first frame.
+- Reconnects automatically on disconnect.
+- **Controls** — same as the iOS app:
+  - Force Keyframe button
+  - Bitrate selector: 500 / 1000 / 2000 / 4000 kbps
+  - D-pad: click/touch and hold any direction; release to stop
+  - Keyboard arrow keys: hold to drive, release to stop
+  - Response toast (3-second auto-dismiss)
+
+### Changing the relay URL
+
+Edit the constant at the top of `viewer.html`:
+
+```javascript
+const RELAY_URL = 'https://your-relay-host:4433/watch';
+```
+
+---
+
 ## End-to-End Startup Sequence
 
 ```bash
@@ -478,6 +792,12 @@ curl http://<relay-host>:4434/health
 | TLS handshake fails | Relay using self-signed cert, iOS expects CA cert | Copy Let's Encrypt cert to `~/.relay/` and restart relay |
 | Low FPS (< 15 fps) | High RTT + QUIC flow control | Lower `bitrate_kbps`; reduce resolution |
 | `Capture buffer full` warnings | Encoder faster than network | Normal under congestion; frames are dropped gracefully |
+| Pi 3: encoder can't keep up | x264 too slow at current resolution | Reduce to 640×480 / 15fps; use `pixel_format = "MJPEG"` |
+| Pi camera not detected | Legacy Camera not enabled (Bullseye) or wrong loopback (Bookworm) | Run `raspi-config` or set up `v4l2loopback` — see Raspberry Pi section |
+| `cross build` fails | Vendored crates + ring conflict with cross's Docker image | Build directly on the Pi (Option A) |
+| `zig cc` link error | zig targeting wrong ABI | Ensure `-target aarch64-linux-gnu` (not `musl`) in the wrapper script |
+| `viewer.html` blank / no WebTransport | Browser too old or wrong browser | Use Chrome 94+; Firefox and Safari are not supported |
+| `viewer.html` decodes but stutters | VideoDecoder backpressure | Normal on slow machines; reduce relay bitrate via bitrate selector |
 
 ---
 
