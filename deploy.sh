@@ -338,8 +338,12 @@ setup_tls() {
   step "TLS certificate"
 
   # Check for an existing Let's Encrypt cert
+  # Run the sudo command non-capturing (output goes to a temp file on the remote).
+  # We cannot capture output from remote_s because ssh -tt routes the sudo password
+  # prompt through the PTY to stdout, contaminating the $() result.
   local domain
-  domain=$(remote_s "$host" 'sudo ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1' 2>/dev/null || true)
+  remote_s "$host" "sudo ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1 > /tmp/_deploy_le || true" 2>/dev/null || true
+  domain=$(remote "$host" "cat /tmp/_deploy_le 2>/dev/null; rm -f /tmp/_deploy_le" || true)
   domain="${domain//$'\r'/}"
 
   if [[ -n "$domain" ]]; then
