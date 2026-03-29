@@ -375,35 +375,72 @@ RUST_LOG=info ./target/release/streamer config.toml
 
 ---
 
-### Option B — Cross-compile with `cross` (faster compile, runs on your dev machine)
+### Option B — Cross-compile with Docker + `cross` (recommended for macOS)
 
-`cross` uses Docker to provide the correct ARM64 C toolchain. Run this on your
-Linux x86\_64 or macOS machine.
+`cross` wraps `cargo build` inside a Docker container that has the correct ARM64
+Linux toolchain, `libx264`, and `libv4l2` pre-installed. No manual toolchain setup
+required. Compile time is 5–15 min on a modern Mac (first run downloads the image).
 
-The streamer depends on system-installed `libx264` and `libv4l2`. The `Cross.toml`
-already checked in at `ios/streamer/Cross.toml` installs them into the cross container
-automatically.
+#### 1. Install Docker Desktop
 
 ```bash
-# 1. Install Docker Desktop (macOS) or Docker Engine (Linux)
+# macOS — download the installer from docker.com, or install via Homebrew:
+brew install --cask docker
 
-# 2. Install cross
-cargo install cross
+# After installing, launch Docker Desktop from Applications (or Spotlight).
+# Wait for the whale icon to appear in the menu bar and stop animating.
+# Docker must be running before you use cross.
+```
 
-# 3. Add the ARM64 Rust target
+Verify Docker is running:
+
+```bash
+docker info   # should print Engine version, no errors
+```
+
+> **Memory**: Docker Desktop defaults to 2 GB RAM. The build is fine at that limit,
+> but increasing to 4 GB (Docker Desktop → Settings → Resources → Memory) speeds up
+> parallel compilation.
+
+#### 2. Install `cross` and the ARM64 Rust target
+
+```bash
+cargo install cross --locked
 rustup target add aarch64-unknown-linux-gnu
+```
 
-# 4. Build from inside ios/streamer/
-#    Cross.toml installs libx264-dev + libv4l-dev into the container for you.
+#### 3. Build
+
+The `Cross.toml` at `ios/streamer/Cross.toml` tells `cross` to install
+`libx264-dev` and `libv4l-dev` into the container before building — no extra steps
+needed.
+
+```bash
 cd ios/streamer
 cross build --release --target aarch64-unknown-linux-gnu
+# First run: cross pulls the base image (~1 GB) and installs x264/v4l2 — one-time cost.
+# Subsequent runs reuse the image and only rebuild changed crates.
+```
 
-# 5. Copy binary to the Pi
+#### 4. Copy the binary to the Pi
+
+```bash
 scp target/aarch64-unknown-linux-gnu/release/streamer pi@raspberrypi:~/
 ```
 
-> **If cross fails** (rare with vendored crates + ring): fall back to Option A.
-> The native build on Pi is fully reliable.
+#### Troubleshooting Option B
+
+| Symptom | Fix |
+|---------|-----|
+| `docker: command not found` | Docker Desktop is not installed or not in PATH — install it and relaunch the terminal |
+| `Cannot connect to the Docker daemon` | Docker Desktop is not running — open it from Applications and wait for the whale icon to settle |
+| `cross: command not found` | Run `cargo install cross --locked` and ensure `~/.cargo/bin` is in your PATH |
+| First build takes > 30 min | Normal — pulling the image + compiling vendored crates from scratch; subsequent builds are much faster |
+| `apt-get: command not found` (inside container) | The cross image is Alpine-based for some targets; file an issue — use Option A as fallback |
+| Build succeeds but binary crashes on Pi | Architecture mismatch — confirm Pi is running 64-bit OS (`uname -m` should print `aarch64`) |
+
+> **If cross still fails** after the above: use Option A (build directly on the Pi).
+> The native build is fully reliable.
 
 For 32-bit Pi OS (armv7, not recommended):
 
