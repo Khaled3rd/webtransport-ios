@@ -16,7 +16,7 @@ pub enum Preset {
 
 impl Preset {
     #[doc(hidden)]
-    pub fn to_cstr(self) -> *const i8 {
+    pub fn to_cstr(self) -> *const ::core::ffi::c_char {
         use self::Preset::*;
 
         (match self {
@@ -30,6 +30,6 @@ impl Preset {
             Slower    => b"slower\0" as *const u8,
             Veryslow  => b"veryslow\0" as *const u8,
             Placebo   => b"placebo\0" as *const u8,
-        }) as *const i8
+        }) as *const ::core::ffi::c_char
     }
 }

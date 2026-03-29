@@ -78,7 +78,7 @@ impl Setup {
         unsafe {
             x264_param_apply_profile(
                 &mut self.raw,
-                b"baseline\0" as *const u8 as *const i8
+                b"baseline\0" as *const u8 as *const ::core::ffi::c_char
             );
         }
         self
@@ -89,7 +89,7 @@ impl Setup {
         unsafe {
             x264_param_apply_profile(
                 &mut self.raw,
-                b"main\0" as *const u8 as *const i8
+                b"main\0" as *const u8 as *const ::core::ffi::c_char
             );
         }
         self
@@ -100,7 +100,7 @@ impl Setup {
         unsafe {
             x264_param_apply_profile(
                 &mut self.raw,
-                b"high\0" as *const u8 as *const i8
+                b"high\0" as *const u8 as *const ::core::ffi::c_char
             );
         }
         self

@@ -11,6 +11,9 @@ fn main() {
 
     let bindings = bindgen::Builder::default()
         .header("data/x264.h")
+        // Ensure the system x264.h is found when cross-compiling (clang may only
+        // search the target sysroot and miss /usr/include on the host container).
+        .clang_arg("-I/usr/include")
         // Use Rust enums (old bindgen behavior) so x264-0.3.0 code works
         .rustified_enum(".*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

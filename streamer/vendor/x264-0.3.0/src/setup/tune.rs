@@ -17,7 +17,7 @@ impl Tune {
         self,
         fast_decode: bool,
         zero_latency: bool,
-    ) -> *const i8 {
+    ) -> *const ::core::ffi::c_char {
         (if !fast_decode && !zero_latency {
             match self {
                 Tune::None       => b"\0" as *const u8,
@@ -65,6 +65,6 @@ impl Tune {
                 Tune::Ssim =>
                     b"fastdecode,zerolatency,ssim\0" as *const u8,
             }
-        }) as *const i8
+        }) as *const ::core::ffi::c_char
     }
 }
