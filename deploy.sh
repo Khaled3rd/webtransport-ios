@@ -175,7 +175,7 @@ build_remote() {
 
 # ── Remote: systemd service ───────────────────────────────────────────────────
 install_service() {
-  local host="$1" name="$2" user="$3" abs_dir="$4" extra_env="${5:-}"
+  local host="$1" name="$2" user="$3" abs_dir="$4" rust_log="${5:-info}" extra_env="${6:-}"
 
   local binary="$abs_dir/target/release/$name"
   local config="$abs_dir/config.toml"
@@ -199,7 +199,7 @@ WorkingDirectory=$abs_dir
 ExecStart=$binary --config $config
 Restart=always
 RestartSec=5
-Environment=RUST_LOG=info
+Environment=RUST_LOG=${rust_log}
 $env_line
 
 [Install]
@@ -208,6 +208,41 @@ WantedBy=multi-user.target"
   write_remote_file_sudo "$host" "/etc/systemd/system/${name}.service" "$svc"
   remote_s "$host" "sudo systemctl daemon-reload && sudo systemctl enable $name"
   ok "Service /etc/systemd/system/${name}.service installed and enabled"
+}
+
+# Interactive systemd setup — prompts the user; skipped if --no-service or no systemd.
+maybe_install_service() {
+  local host="$1" name="$2" user="$3" abs_dir="$4"
+  local manual_cmd="RUST_LOG=info $abs_dir/target/release/$name --config $abs_dir/config.toml"
+
+  if [[ $NO_SERVICE -eq 1 ]]; then
+    warn "Skipping systemd (--no-service)"
+    echo -e "  Start manually: ${CYN}ssh $host '$manual_cmd &'${RST}"
+    return
+  fi
+
+  if ! has_systemd "$host" 2>/dev/null; then
+    warn "systemd not available on $host"
+    echo -e "  Start manually: ${CYN}ssh $host 'source ~/.cargo/env; $manual_cmd &'${RST}"
+    return
+  fi
+
+  step "Systemd service"
+  local choice
+  read -rp "$(printf '%b' "${CYN}?${RST} Configure systemd service for ${BLD}${name}${RST}? [${BLD}Y${RST}/n]: ")" choice
+  choice="${choice:-Y}"
+
+  if [[ ! "$choice" =~ ^[Yy] ]]; then
+    warn "Skipping systemd — start manually:"
+    echo -e "  ${CYN}ssh $host 'source ~/.cargo/env; $manual_cmd &'${RST}"
+    return
+  fi
+
+  local rust_log
+  ask "RUST_LOG level (error/warn/info/debug)" "info" rust_log
+
+  install_service "$host" "$name" "$user" "$abs_dir" "$rust_log"
+  restart_service "$host" "$name"
 }
 
 restart_service() {
@@ -460,14 +495,7 @@ deploy_relay() {
   build_remote "$host" "$abs_dir"
 
   # ── Service ────────────────────────────────────────────────────────────────
-  if [[ $NO_SERVICE -eq 0 ]] && has_systemd "$host" 2>/dev/null; then
-    step "Systemd service"
-    install_service "$host" "relay" "$ruser" "$abs_dir"
-    restart_service "$host" "relay"
-  else
-    [[ $NO_SERVICE -eq 1 ]] && warn "Skipping systemd (--no-service)" || warn "systemd not available"
-    echo -e "  Start manually: ${CYN}ssh $host 'RUST_LOG=info $abs_dir/target/release/relay --config $abs_dir/config.toml &'${RST}"
-  fi
+  maybe_install_service "$host" "relay" "$ruser" "$abs_dir"
 
   header "Relay deployment done"
   ok "Relay endpoint: https://<host>:4433"
@@ -561,14 +589,7 @@ deploy_streamer() {
   build_remote "$host" "$abs_dir"
 
   # ── Service ────────────────────────────────────────────────────────────────
-  if [[ $NO_SERVICE -eq 0 ]] && has_systemd "$host" 2>/dev/null; then
-    step "Systemd service"
-    install_service "$host" "streamer" "$ruser" "$abs_dir"
-    restart_service "$host" "streamer"
-  else
-    [[ $NO_SERVICE -eq 1 ]] && warn "Skipping systemd (--no-service)" || warn "systemd not available"
-    echo -e "  Start manually: ${CYN}ssh $host 'RUST_LOG=info $abs_dir/target/release/streamer --config $abs_dir/config.toml &'${RST}"
-  fi
+  maybe_install_service "$host" "streamer" "$ruser" "$abs_dir"
 
   header "Streamer deployment done"
   ok "Streamer running on $host"
