@@ -78,10 +78,11 @@ check_conn() {
   ok "Connected to $host"
 }
 
-# Fetch the remote user's home directory (resolves ~)
+# Fetch the remote user's home directory
+# cd ~ && pwd is more reliable than $HOME — works even when $HOME is unset or wrong
 remote_home() {
   local host="$1"
-  remote "$host" 'echo $HOME'
+  remote "$host" 'cd ~ && pwd'
 }
 
 # Expand a path that may start with ~ using the remote home
@@ -402,12 +403,13 @@ deploy_relay() {
   header "Deploy Relay → $host"
   check_conn "$host"
 
-  local rhome
+  local ruser rhome
+  ruser=$(remote "$host" 'whoami')
   rhome=$(remote_home "$host")
+  [[ -z "$rhome" ]] && die "Could not determine home directory on $host"
+  info "Remote: user=${BLD}${ruser}${RST}, home=${BLD}${rhome}${RST}"
   local abs_dir
   abs_dir=$(expand_remote_path "$rhome" "$remote_dir")
-  local ruser
-  ruser=$(remote "$host" 'whoami')
 
   # ── Prompts ────────────────────────────────────────────────────────────────
   header "Configuration"
@@ -473,12 +475,13 @@ deploy_streamer() {
   header "Deploy Streamer → $host"
   check_conn "$host"
 
-  local rhome
+  local ruser rhome
+  ruser=$(remote "$host" 'whoami')
   rhome=$(remote_home "$host")
+  [[ -z "$rhome" ]] && die "Could not determine home directory on $host"
+  info "Remote: user=${BLD}${ruser}${RST}, home=${BLD}${rhome}${RST}"
   local abs_dir
   abs_dir=$(expand_remote_path "$rhome" "$remote_dir")
-  local ruser
-  ruser=$(remote "$host" 'whoami')
 
   # ── Detect architecture and Pi model ──────────────────────────────────────
   step "Target detection"
