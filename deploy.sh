@@ -108,23 +108,43 @@ ensure_rust() {
 }
 
 # ── Remote: system packages ───────────────────────────────────────────────────
+# Package names differ across distros — map them here.
 ensure_deps() {
-  local host="$1"; shift
-  local pkgs=("$@")
+  local host="$1" component="$2"   # component: relay | streamer
   step "System packages"
 
-  # Detect package manager
   if remote "$host" 'command -v apt-get > /dev/null 2>&1'; then
-    info "Installing: ${pkgs[*]} …"
-    remote "$host" "export DEBIAN_FRONTEND=noninteractive && \
-      sudo apt-get update -qq && \
-      sudo apt-get install -y -qq ${pkgs[*]}"
+    # Debian / Ubuntu / Raspberry Pi OS
+    local pkgs="build-essential clang libclang-dev cmake make git"
+    [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python3"
+    info "apt-get install: $pkgs"
+    remote "$host" "export DEBIAN_FRONTEND=noninteractive
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq $pkgs"
+
   elif remote "$host" 'command -v dnf > /dev/null 2>&1'; then
-    remote "$host" "sudo dnf install -y -q ${pkgs[*]}"
+    # Amazon Linux 2023 / Fedora / RHEL / CentOS Stream
+    local pkgs="gcc gcc-c++ clang clang-devel cmake make git"
+    [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python3"
+    info "dnf install: $pkgs"
+    remote "$host" "sudo dnf install -y -q $pkgs"
+
+  elif remote "$host" 'command -v yum > /dev/null 2>&1'; then
+    # Amazon Linux 2 / older RHEL
+    local pkgs="gcc gcc-c++ clang clang-devel cmake make git"
+    [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python3"
+    info "yum install: $pkgs"
+    remote "$host" "sudo yum install -y -q $pkgs"
+
   elif remote "$host" 'command -v pacman > /dev/null 2>&1'; then
-    remote "$host" "sudo pacman -Sy --noconfirm --quiet ${pkgs[*]}"
+    # Arch Linux
+    local pkgs="base-devel clang cmake git"
+    [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python"
+    info "pacman install: $pkgs"
+    remote "$host" "sudo pacman -Sy --noconfirm --quiet $pkgs"
+
   else
-    warn "Unknown package manager — install manually: ${pkgs[*]}"
+    warn "Unknown package manager — install manually: clang clang-devel/libclang-dev cmake make git"
     return
   fi
   ok "Packages ready"
@@ -191,8 +211,10 @@ restart_service() {
 }
 
 has_systemd() {
+  # Just check the binary exists — is-system-running exits non-zero on AWS
+  # even when systemd is fully operational (status "degraded" is common).
   local host="$1"
-  remote "$host" 'command -v systemctl > /dev/null 2>&1 && systemctl is-system-running --quiet 2>/dev/null || systemctl status > /dev/null 2>&1'
+  remote "$host" 'command -v systemctl > /dev/null 2>&1'
 }
 
 # ── Interactive prompts ───────────────────────────────────────────────────────
@@ -329,7 +351,7 @@ deploy_relay() {
   ask  "Max subscribers" "50" max_sub
 
   # ── Deps ───────────────────────────────────────────────────────────────────
-  ensure_deps "$host" build-essential clang libclang-dev cmake make git
+  ensure_deps "$host" relay
   ensure_rust "$host"
 
   # ── Source ─────────────────────────────────────────────────────────────────
@@ -371,6 +393,12 @@ deploy_relay() {
   echo -e "  Watch URL   : ${CYN}https://$(remote "$host" 'hostname -f 2>/dev/null || hostname'):4433/watch${RST}"
   echo -e "  Health      : ${CYN}ssh $host 'curl -s http://localhost:4434/health'${RST}"
   echo -e "  Logs        : ${CYN}ssh $host 'journalctl -u relay -f'${RST}"
+  echo
+  warn "AWS / cloud firewall checklist:"
+  echo -e "    ${BLD}UDP 4433${RST} inbound — WebTransport / QUIC (viewers + streamer)"
+  echo -e "    ${BLD}TCP 4434${RST} inbound — health check endpoint (optional)"
+  echo -e "    ${BLD}TCP 443${RST}  inbound — Let's Encrypt HTTP challenge (if obtaining cert)"
+  echo -e "  AWS: EC2 → Security Groups → Inbound Rules → Add Rule"
 }
 
 # ── Deploy streamer ───────────────────────────────────────────────────────────
@@ -423,7 +451,7 @@ deploy_streamer() {
   ask "Encoder bitrate kbps"   "$default_bitrate"                     bitrate
 
   # ── Deps ───────────────────────────────────────────────────────────────────
-  ensure_deps "$host" build-essential clang libclang-dev cmake make git v4l-utils python3
+  ensure_deps "$host" streamer
   ensure_rust "$host"
 
   # ── Source ─────────────────────────────────────────────────────────────────
@@ -496,6 +524,9 @@ Options:
 Examples:
   $(basename "$0") relay
   $(basename "$0") relay    --host b@ruh.sunbour.com
+  $(basename "$0") relay    --host ubuntu@54.123.45.67        # AWS Ubuntu AMI
+  $(basename "$0") relay    --host ec2-user@54.123.45.67      # AWS Amazon Linux AMI
+  $(basename "$0") relay    --host aws_server                 # SSH config alias
   $(basename "$0") streamer
   $(basename "$0") streamer --host pi@192.168.1.42
   $(basename "$0") streamer --host pi@192.168.1.42 --force-config
