@@ -446,25 +446,25 @@ cat > ios/streamer/.cargo/config.toml << 'EOF'
 linker = "/usr/local/bin/zig-aarch64-cc"
 EOF
 
-# 4. Point bindgen at Homebrew LLVM and zig's bundled Linux + glibc headers.
-#    x264-sys and v4l2-sys-mit run bindgen at build time and need Linux headers
-#    (inttypes.h, linux/videodev2.h) which are absent on macOS.
-#    Xcode's clang has a #include_next issue with its own inttypes.h when the
-#    target is Linux — use Homebrew LLVM's libclang instead.
+# 4. Install Linux headers for bindgen.
+#    x264-sys and v4l2-sys-mit run bindgen at build time and need Linux C and
+#    kernel UAPI headers (inttypes.h, linux/videodev2.h) which are absent on macOS.
+#
+#    zig ≤ 0.13 bundled these headers inside its lib directory.
+#    zig 0.14+ no longer includes them — use musl-cross instead, which ships a
+#    complete ARM64 sysroot (musl libc + Linux kernel UAPI headers).
 
-# a) Use Homebrew LLVM's libclang for bindgen (not Xcode's)
+brew tap FiloSottile/musl-cross
+brew install musl-cross --with-aarch64 --without-x86_64
+
+MUSL_INC="$(brew --prefix musl-cross)/libexec/aarch64-linux-musl/include"
+test -f "${MUSL_INC}/inttypes.h"            && echo "libc OK"   || echo "ERROR: musl-cross headers missing at ${MUSL_INC}"
+test -f "${MUSL_INC}/linux/videodev2.h"     && echo "linux OK"  || echo "ERROR: Linux UAPI headers missing at ${MUSL_INC}/linux/"
+
+# Use Homebrew LLVM's libclang (not Xcode's) — Xcode's has a #include_next
+# issue in its inttypes.h when the target is Linux.
 export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
-
-# b) Locate zig's bundled Linux/glibc headers and verify they exist
-ZIG_LIBC="$(zig env | awk -F'"' '/lib_dir/{print $4}')/libc/include"
-test -f "${ZIG_LIBC}/generic-glibc/inttypes.h"        && echo "glibc OK"  || echo "WARN: glibc headers not found — see troubleshooting"
-test -f "${ZIG_LIBC}/any-linux-any/linux/videodev2.h"  && echo "linux OK"  || echo "WARN: linux headers not found — see troubleshooting"
-
-export BINDGEN_EXTRA_CLANG_ARGS="\
-  --target=aarch64-linux-gnu \
-  -isystem ${ZIG_LIBC}/aarch64-linux-gnu \
-  -isystem ${ZIG_LIBC}/generic-glibc \
-  -isystem ${ZIG_LIBC}/any-linux-any"
+export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -isystem ${MUSL_INC}"
 
 # 5. Build
 cd ios/streamer
@@ -863,8 +863,9 @@ curl http://<relay-host>:4434/health
 | Pi camera not detected | Legacy Camera not enabled (Bullseye) or wrong loopback (Bookworm) | Run `raspi-config` or set up `v4l2loopback` — see Raspberry Pi section |
 | `cross build` fails | Vendored crates + ring conflict with cross's Docker image | Build directly on the Pi (Option A) |
 | `zig cc`: `unable to parse target query 'aarch64-unknown-linux-gnu'` | Cargo passes Rust triple to zig which only understands its own format | Use the updated wrapper script that filters `--target=*` before passing args to zig |
-| `zig cc`: `inttypes.h` not found (`x264-sys`) | Xcode's `libclang` has a `#include_next` issue when targeting Linux | Set `LIBCLANG_PATH` to Homebrew LLVM's lib dir and `BINDGEN_EXTRA_CLANG_ARGS` to zig's glibc headers (step 4); run the `test -f` checks first to confirm `ZIG_LIBC` resolved |
-| `zig cc`: `linux/videodev2.h` not found (`v4l2-sys-mit`) | Linux UAPI headers are absent on macOS | Same fix as above; confirm `${ZIG_LIBC}/any-linux-any/linux/videodev2.h` exists — if the `test -f` prints WARN, find headers with `find $(brew --prefix zig) -name videodev2.h 2>/dev/null` and set `ZIG_LIBC` to the parent of the `any-linux-any` dir |
+| `zig cc`: `inttypes.h` not found (`x264-sys`) | zig 0.14+ no longer bundles Linux headers; Xcode's libclang also has a `#include_next` issue when targeting Linux | Install `musl-cross` and set `LIBCLANG_PATH` + `BINDGEN_EXTRA_CLANG_ARGS` per step 4 |
+| `zig cc`: `linux/videodev2.h` not found (`v4l2-sys-mit`) | Linux kernel UAPI headers absent on macOS (zig 0.14+ removed bundled headers) | Same — `musl-cross` ships these headers at `$(brew --prefix musl-cross)/libexec/aarch64-linux-musl/include/linux/` |
+| `musl-cross` install fails / no `--with-aarch64` | Tap or formula changed | Try `brew install musl-cross` without options; if sysroot is at a different path, run `find $(brew --prefix musl-cross) -name videodev2.h` to locate it |
 | `viewer.html` blank / no WebTransport | Browser too old or wrong browser | Use Chrome 94+; Firefox and Safari are not supported |
 | `viewer.html` decodes but stutters | VideoDecoder backpressure | Normal on slow machines; reduce relay bitrate via bitrate selector |
 
