@@ -418,29 +418,54 @@ cross build --release --target armv7-unknown-linux-gnueabihf
 brew install zig llvm
 rustup target add aarch64-unknown-linux-gnu
 
-# 2. Create a wrapper script that zig uses as the C cross-compiler
-#    /usr/local/bin is root-owned — use sudo tee
+# 2. Create a wrapper script — must filter out flags zig doesn't understand.
+#    Cargo (and crates like ring) pass --target=aarch64-unknown-linux-gnu
+#    (Rust triple), which conflicts with zig's own -target flag.
+#    macOS flags -arch ARCH and -mmacosx-version-min=X must also be dropped.
+#    /usr/local/bin is root-owned — use sudo tee.
 sudo tee /usr/local/bin/zig-aarch64-cc << 'EOF'
-#!/bin/sh
-exec zig cc -target aarch64-linux-gnu "$@"
+#!/bin/bash
+args=()
+skip_next=0
+for a in "$@"; do
+  if (( skip_next )); then skip_next=0; continue; fi
+  case "$a" in
+    --target=*|-mmacosx-version-min=*) ;;  # Rust/macOS triples zig rejects
+    -arch) skip_next=1 ;;                  # two-word macOS flag; skip flag + value
+    *) args+=("$a") ;;
+  esac
+done
+exec zig cc -target aarch64-linux-gnu "${args[@]}"
 EOF
 sudo chmod +x /usr/local/bin/zig-aarch64-cc
 
-# 3. Tell Cargo to use it — create (or edit) ios/streamer/.cargo/config.toml
+# 3. Tell Cargo to use it
 mkdir -p ios/streamer/.cargo
 cat > ios/streamer/.cargo/config.toml << 'EOF'
 [target.aarch64-unknown-linux-gnu]
 linker = "/usr/local/bin/zig-aarch64-cc"
 EOF
 
-# 4. Build
+# 4. Point bindgen at zig's bundled Linux + glibc headers.
+#    x264-sys and v4l2-sys-mit run bindgen at build time and need Linux
+#    headers (inttypes.h, linux/videodev2.h …) which are absent on macOS.
+#    zig ships a full copy — locate them and pass them to bindgen.
+ZIG_LIBC="$(zig env | python3 -c \
+  'import sys,json; print(json.load(sys.stdin)["lib_dir"])')/libc/include"
+export BINDGEN_EXTRA_CLANG_ARGS="\
+  --target=aarch64-linux-gnu \
+  -isystem ${ZIG_LIBC}/aarch64-linux-gnu \
+  -isystem ${ZIG_LIBC}/generic-glibc \
+  -isystem ${ZIG_LIBC}/any-linux-any"
+
+# 5. Build
 cd ios/streamer
 CC="/usr/local/bin/zig-aarch64-cc" \
 CXX="zig c++ -target aarch64-linux-gnu" \
 AR="$(brew --prefix llvm)/bin/llvm-ar" \
 cargo build --release --target aarch64-unknown-linux-gnu
 
-# 5. Copy to Pi
+# 6. Copy to Pi
 scp target/aarch64-unknown-linux-gnu/release/streamer pi@raspberrypi:~/
 ```
 
@@ -829,7 +854,9 @@ curl http://<relay-host>:4434/health
 | Pi 3: encoder can't keep up | x264 too slow at current resolution | Reduce to 640×480 / 15fps; use `pixel_format = "MJPEG"` |
 | Pi camera not detected | Legacy Camera not enabled (Bullseye) or wrong loopback (Bookworm) | Run `raspi-config` or set up `v4l2loopback` — see Raspberry Pi section |
 | `cross build` fails | Vendored crates + ring conflict with cross's Docker image | Build directly on the Pi (Option A) |
-| `zig cc` link error | zig targeting wrong ABI | Ensure `-target aarch64-linux-gnu` (not `musl`) in the wrapper script |
+| `zig cc`: `unable to parse target query 'aarch64-unknown-linux-gnu'` | Cargo passes Rust triple to zig which only understands its own format | Use the updated wrapper script that filters `--target=*` before passing args to zig |
+| `zig cc`: `inttypes.h` not found (`x264-sys` build failure) | bindgen uses host clang which can't find Linux headers on macOS | Set `BINDGEN_EXTRA_CLANG_ARGS` pointing to zig's bundled glibc headers (see step 4) |
+| `zig cc`: `linux/videodev2.h` not found (`v4l2-sys-mit` build failure) | V4L2 is Linux-only; the kernel header is absent on macOS | Same fix as above — zig ships Linux UAPI headers in its `any-linux-any` directory |
 | `viewer.html` blank / no WebTransport | Browser too old or wrong browser | Use Chrome 94+; Firefox and Safari are not supported |
 | `viewer.html` decodes but stutters | VideoDecoder backpressure | Normal on slow machines; reduce relay bitrate via bitrate selector |
 
