@@ -57,7 +57,7 @@ remote() {
 # Copy a local file/dir to remote using rsync
 push() {
   local src="$1" host="$2" dst="$3"
-  rsync -az --delete --info=progress2 -e "ssh ${SSH_OPTS[*]}" "$src" "${host}:${dst}"
+  rsync -az --delete --progress -e "ssh ${SSH_OPTS[*]}" "$src" "${host}:${dst}"
 }
 
 # Write a string as a file on the remote host (safe for arbitrary content)
