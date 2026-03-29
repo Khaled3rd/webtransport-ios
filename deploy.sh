@@ -46,18 +46,18 @@ FORCE_CONFIG=0
 NO_SERVICE=0
 
 # ── SSH helpers ───────────────────────────────────────────────────────────────
-SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
 
 # Run a command on a remote host
 remote() {
   local host="$1"; shift
-  ssh $SSH_OPTS "$host" "$@"
+  ssh "${SSH_OPTS[@]}" "$host" "$@"
 }
 
 # Copy a local file/dir to remote using rsync
 push() {
   local src="$1" host="$2" dst="$3"
-  rsync -az --delete --info=progress2 -e "ssh $SSH_OPTS" "$src" "${host}:${dst}"
+  rsync -az --delete --info=progress2 -e "ssh ${SSH_OPTS[*]}" "$src" "${host}:${dst}"
 }
 
 # Write a string as a file on the remote host (safe for arbitrary content)
@@ -459,7 +459,7 @@ deploy_streamer() {
   remote "$host" "mkdir -p $abs_dir"
   push "$SCRIPT_DIR/streamer/" "$host" "$abs_dir/"
   # Toy controller alongside the streamer
-  rsync -az -e "ssh $SSH_OPTS" "$SCRIPT_DIR/toy_controller.py" "${host}:${rhome}/toy_controller.py"
+  rsync -az -e "ssh ${SSH_OPTS[*]}" "$SCRIPT_DIR/toy_controller.py" "${host}:${rhome}/toy_controller.py"
   ok "Source and toy_controller.py synced to $host"
 
   # ── Config ─────────────────────────────────────────────────────────────────
