@@ -450,8 +450,7 @@ EOF
 #    x264-sys and v4l2-sys-mit run bindgen at build time and need Linux
 #    headers (inttypes.h, linux/videodev2.h …) which are absent on macOS.
 #    zig ships a full copy — locate them and pass them to bindgen.
-ZIG_LIBC="$(zig env | python3 -c \
-  'import sys,json; print(json.load(sys.stdin)["lib_dir"])')/libc/include"
+ZIG_LIBC="$(zig env | awk -F'"' '/lib_dir/{print $4}')/libc/include"
 export BINDGEN_EXTRA_CLANG_ARGS="\
   --target=aarch64-linux-gnu \
   -isystem ${ZIG_LIBC}/aarch64-linux-gnu \
