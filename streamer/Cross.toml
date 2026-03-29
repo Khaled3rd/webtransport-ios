@@ -1,3 +1,5 @@
+# On Apple Silicon (M1/M2/M3/M4) the cross image only ships an amd64 manifest.
+# Set DOCKER_DEFAULT_PLATFORM=linux/amd64 when invoking cross (see README Option B).
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
     "apt-get update -qq",

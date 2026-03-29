@@ -409,15 +409,23 @@ cargo install cross --locked
 rustup target add aarch64-unknown-linux-gnu
 ```
 
-> **Apple Silicon (M1 / M2 / M3 / M4)**: `cross` unconditionally tries to install
-> `stable-x86_64-unknown-linux-gnu` on the host before entering Docker. rustup refuses
-> because that toolchain can't run natively on ARM macOS. Pre-install it with
-> `--force-non-host` to let cross proceed (the toolchain is only used inside the
-> x86_64 Linux container, not on macOS):
+> **Apple Silicon (M1 / M2 / M3 / M4) — two one-time setup steps:**
 >
-> ```bash
-> rustup toolchain add stable-x86_64-unknown-linux-gnu --profile minimal --force-non-host
-> ```
+> 1. `cross` tries to install `stable-x86_64-unknown-linux-gnu` on the host before
+>    entering Docker. rustup refuses because that toolchain can't run natively on ARM
+>    macOS. Install it with `--force-non-host` (it is only used inside the Linux
+>    container):
+>    ```bash
+>    rustup toolchain add stable-x86_64-unknown-linux-gnu --profile minimal --force-non-host
+>    ```
+>
+> 2. The cross Docker image only ships an `amd64` manifest — Docker on Apple Silicon
+>    defaults to pulling `arm64` and fails. Set `DOCKER_DEFAULT_PLATFORM=linux/amd64`
+>    so Docker pulls the amd64 image (runs via Rosetta 2):
+>    ```bash
+>    export DOCKER_DEFAULT_PLATFORM=linux/amd64
+>    ```
+>    Add this export to your shell profile (`~/.zshrc`) to make it permanent.
 
 #### 3. Build
 
@@ -427,7 +435,13 @@ needed.
 
 ```bash
 cd ios/streamer
+
+# Intel Mac / Linux:
 cross build --release --target aarch64-unknown-linux-gnu
+
+# Apple Silicon — must force amd64 Docker image (Rosetta 2 runs it transparently):
+DOCKER_DEFAULT_PLATFORM=linux/amd64 cross build --release --target aarch64-unknown-linux-gnu
+
 # First run: cross pulls the base image (~1 GB) and installs x264/v4l2 — one-time cost.
 # Subsequent runs reuse the image and only rebuild changed crates.
 ```
@@ -446,6 +460,7 @@ scp target/aarch64-unknown-linux-gnu/release/streamer pi@raspberrypi:~/
 | `Cannot connect to the Docker daemon` | Docker Desktop is not running — open it from Applications and wait for the whale icon to settle |
 | `cross: command not found` | Run `cargo install cross --locked` and ensure `~/.cargo/bin` is in your PATH |
 | `toolchain 'stable-x86_64-unknown-linux-gnu' may not be able to run` (Apple Silicon) | cross tries to install an x86_64 Linux toolchain on ARM macOS before entering Docker | `rustup toolchain add stable-x86_64-unknown-linux-gnu --profile minimal --force-non-host` |
+| `no match for platform in manifest: not found` (Apple Silicon) | cross image only has an `amd64` manifest; Docker on Apple Silicon defaults to `arm64` | Run with `DOCKER_DEFAULT_PLATFORM=linux/amd64` (or add it to `~/.zshrc`) |
 | First build takes > 30 min | Normal — pulling the image + compiling vendored crates from scratch; subsequent builds are much faster |
 | `apt-get: command not found` (inside container) | The cross image is Alpine-based for some targets; file an issue — use Option A as fallback |
 | Build succeeds but binary crashes on Pi | Architecture mismatch — confirm Pi is running 64-bit OS (`uname -m` should print `aarch64`) |
