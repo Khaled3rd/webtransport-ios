@@ -380,6 +380,10 @@ RUST_LOG=info ./target/release/streamer config.toml
 `cross` uses Docker to provide the correct ARM64 C toolchain. Run this on your
 Linux x86\_64 or macOS machine.
 
+The streamer depends on system-installed `libx264` and `libv4l2`. The `Cross.toml`
+already checked in at `ios/streamer/Cross.toml` installs them into the cross container
+automatically.
+
 ```bash
 # 1. Install Docker Desktop (macOS) or Docker Engine (Linux)
 
@@ -390,6 +394,7 @@ cargo install cross
 rustup target add aarch64-unknown-linux-gnu
 
 # 4. Build from inside ios/streamer/
+#    Cross.toml installs libx264-dev + libv4l-dev into the container for you.
 cd ios/streamer
 cross build --release --target aarch64-unknown-linux-gnu
 
@@ -397,8 +402,8 @@ cross build --release --target aarch64-unknown-linux-gnu
 scp target/aarch64-unknown-linux-gnu/release/streamer pi@raspberrypi:~/
 ```
 
-> **If cross fails** (common with vendored crates + ring on some setups): fall back to
-> Option A. The native build on Pi is fully reliable.
+> **If cross fails** (rare with vendored crates + ring): fall back to Option A.
+> The native build on Pi is fully reliable.
 
 For 32-bit Pi OS (armv7, not recommended):
 
@@ -409,7 +414,13 @@ cross build --release --target armv7-unknown-linux-gnueabihf
 
 ---
 
-### Option C — Cross-compile from macOS using `zig cc` (no Docker needed)
+### Option C — Cross-compile from macOS using `zig cc` (advanced / limited)
+
+> **Not recommended for most users.** The streamer links against `libx264` and
+> `libv4l2`, which are Linux C libraries. Option C only handles the Rust→ARM64
+> compilation; you must also cross-compile those C libraries from source or obtain
+> ARM64 static builds. **Option B (Docker + cross) handles this automatically via
+> `Cross.toml`.** Option C is only worth pursuing if Docker is unavailable.
 
 `zig` acts as a drop-in ARM64 C cross-compiler without installing a full GNU toolchain.
 
@@ -863,6 +874,7 @@ curl http://<relay-host>:4434/health
 | Pi camera not detected | Legacy Camera not enabled (Bullseye) or wrong loopback (Bookworm) | Run `raspi-config` or set up `v4l2loopback` — see Raspberry Pi section |
 | `cross build` fails | Vendored crates + ring conflict with cross's Docker image | Build directly on the Pi (Option A) |
 | `zig cc`: `unable to parse target query 'aarch64-unknown-linux-gnu'` | Cargo passes Rust triple to zig which only understands its own format | Use the updated wrapper script that filters `--target=*` before passing args to zig |
+| `zig cc`: `'x264.h' file not found` | `x264` is a system C library — not bundled in the Rust vendor tree; must be installed or cross-compiled | Use Option B instead: `Cross.toml` installs `libx264-dev` into the Docker container automatically |
 | `zig cc`: `inttypes.h` not found (`x264-sys`) | zig 0.14+ no longer bundles Linux headers; Xcode's libclang also has a `#include_next` issue when targeting Linux | Install `musl-cross` and set `LIBCLANG_PATH` + `BINDGEN_EXTRA_CLANG_ARGS` per step 4 |
 | `zig cc`: `linux/videodev2.h` not found (`v4l2-sys-mit`) | Linux kernel UAPI headers absent on macOS (zig 0.14+ removed bundled headers) | Same — `musl-cross` ships these headers at `$(brew --prefix musl-cross)/libexec/aarch64-linux-musl/include/linux/` |
 | `musl-cross` install fails / no `--with-aarch64` | Tap or formula changed | Try `brew install musl-cross` without options; if sysroot is at a different path, run `find $(brew --prefix musl-cross) -name videodev2.h` to locate it |

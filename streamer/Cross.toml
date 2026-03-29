@@ -1,0 +1,5 @@
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update -qq",
+    "apt-get install -y --no-install-recommends libx264-dev libv4l-dev",
+]
