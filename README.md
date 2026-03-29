@@ -419,11 +419,12 @@ brew install zig llvm
 rustup target add aarch64-unknown-linux-gnu
 
 # 2. Create a wrapper script that zig uses as the C cross-compiler
-cat > /usr/local/bin/zig-aarch64-cc << 'EOF'
+#    /usr/local/bin is root-owned — use sudo tee
+sudo tee /usr/local/bin/zig-aarch64-cc << 'EOF'
 #!/bin/sh
 exec zig cc -target aarch64-linux-gnu "$@"
 EOF
-chmod +x /usr/local/bin/zig-aarch64-cc
+sudo chmod +x /usr/local/bin/zig-aarch64-cc
 
 # 3. Tell Cargo to use it — create (or edit) ios/streamer/.cargo/config.toml
 mkdir -p ios/streamer/.cargo
