@@ -173,9 +173,13 @@ install_service() {
   local env_line=""
   [[ -n "$extra_env" ]] && env_line="Environment=$extra_env"
 
+  # ${name^} is bash 4+ only; macOS ships bash 3.2 — use tr instead
+  local name_cap
+  name_cap="$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}"
+
   local svc
   svc="[Unit]
-Description=WebTransport ${name^}
+Description=WebTransport ${name_cap}
 After=network-online.target
 Wants=network-online.target
 
