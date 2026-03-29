@@ -48,10 +48,16 @@ NO_SERVICE=0
 # ── SSH helpers ───────────────────────────────────────────────────────────────
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
 
-# Run a command on a remote host
+# Run a command on a remote host (no TTY — safe for output capture + rsync)
 remote() {
   local host="$1"; shift
   ssh "${SSH_OPTS[@]}" "$host" "$@"
+}
+
+# Run a command that requires sudo (allocates pseudo-TTY so sudo can prompt for password)
+remote_s() {
+  local host="$1"; shift
+  ssh -tt "${SSH_OPTS[@]}" "$host" "$@"
 }
 
 # Copy a local file/dir to remote using rsync
@@ -68,7 +74,11 @@ write_remote_file() {
 
 write_remote_file_sudo() {
   local host="$1" path="$2" content="$3"
-  printf '%s' "$content" | remote "$host" "sudo tee $path > /dev/null"
+  # Write to a temp file without sudo (stdin-safe), then sudo-move into place.
+  # Can't pipe directly into "sudo tee" when using -tt because stdin is the TTY.
+  local tmp="/tmp/_deploy_$$"
+  printf '%s' "$content" | remote "$host" "cat > '$tmp'"
+  remote_s "$host" "sudo mv '$tmp' '$path' && sudo chmod 644 '$path'"
 }
 
 check_conn() {
@@ -119,7 +129,7 @@ ensure_deps() {
     local pkgs="build-essential clang libclang-dev cmake make git"
     [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python3"
     info "apt-get install: $pkgs"
-    remote "$host" "export DEBIAN_FRONTEND=noninteractive
+    remote_s "$host" "export DEBIAN_FRONTEND=noninteractive
       sudo apt-get update -qq
       sudo apt-get install -y -qq $pkgs"
 
@@ -128,21 +138,21 @@ ensure_deps() {
     local pkgs="gcc gcc-c++ clang clang-devel cmake make git"
     [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python3"
     info "dnf install: $pkgs"
-    remote "$host" "sudo dnf install -y -q $pkgs"
+    remote_s "$host" "sudo dnf install -y -q $pkgs"
 
   elif remote "$host" 'command -v yum > /dev/null 2>&1'; then
     # Amazon Linux 2 / older RHEL
     local pkgs="gcc gcc-c++ clang clang-devel cmake make git"
     [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python3"
     info "yum install: $pkgs"
-    remote "$host" "sudo yum install -y -q $pkgs"
+    remote_s "$host" "sudo yum install -y -q $pkgs"
 
   elif remote "$host" 'command -v pacman > /dev/null 2>&1'; then
     # Arch Linux
     local pkgs="base-devel clang cmake git"
     [[ "$component" == "streamer" ]] && pkgs+=" v4l-utils python"
     info "pacman install: $pkgs"
-    remote "$host" "sudo pacman -Sy --noconfirm --quiet $pkgs"
+    remote_s "$host" "sudo pacman -Sy --noconfirm --quiet $pkgs"
 
   else
     warn "Unknown package manager — install manually: clang clang-devel/libclang-dev cmake make git"
@@ -196,14 +206,14 @@ $env_line
 WantedBy=multi-user.target"
 
   write_remote_file_sudo "$host" "/etc/systemd/system/${name}.service" "$svc"
-  remote "$host" "sudo systemctl daemon-reload && sudo systemctl enable $name"
+  remote_s "$host" "sudo systemctl daemon-reload && sudo systemctl enable $name"
   ok "Service /etc/systemd/system/${name}.service installed and enabled"
 }
 
 restart_service() {
   local host="$1" name="$2"
   info "Restarting $name …"
-  remote "$host" "sudo systemctl restart $name"
+  remote_s "$host" "sudo systemctl restart $name"
   sleep 2
   local status
   status=$(remote "$host" "systemctl is-active $name" || true)
@@ -249,17 +259,17 @@ install_certbot() {
   fi
   info "Installing certbot …"
   if remote "$host" 'command -v apt-get > /dev/null 2>&1'; then
-    remote "$host" "sudo apt-get install -y -qq certbot"
+    remote_s "$host" "sudo apt-get install -y -qq certbot"
   elif remote "$host" 'command -v dnf > /dev/null 2>&1'; then
     # Amazon Linux 2023 / Fedora — certbot may be in the repo or via pip
-    remote "$host" "sudo dnf install -y -q certbot 2>/dev/null || sudo pip3 install certbot"
+    remote_s "$host" "sudo dnf install -y -q certbot 2>/dev/null || sudo pip3 install certbot"
   elif remote "$host" 'command -v yum > /dev/null 2>&1'; then
     # Amazon Linux 2 — needs EPEL first
-    remote "$host" "sudo amazon-linux-extras install -y epel 2>/dev/null || true
+    remote_s "$host" "sudo amazon-linux-extras install -y epel 2>/dev/null || true
       sudo yum install -y -q certbot 2>/dev/null || sudo pip3 install certbot"
   else
     # Universal fallback
-    remote "$host" "sudo pip3 install certbot"
+    remote_s "$host" "sudo pip3 install certbot"
   fi
   ok "certbot installed"
 }
@@ -267,8 +277,8 @@ install_certbot() {
 copy_le_cert() {
   # Copy an existing Let's Encrypt cert into ~/.relay/ and install the renewal hook
   local host="$1" domain="$2"
-  remote "$host" "
-    mkdir -p ~/.relay
+  remote "$host" "mkdir -p ~/.relay"
+  remote_s "$host" "
     sudo cp /etc/letsencrypt/live/${domain}/fullchain.pem ~/.relay/cert.pem
     sudo cp /etc/letsencrypt/live/${domain}/privkey.pem   ~/.relay/key.pem
     sudo chown \"\$(whoami):\$(whoami)\" ~/.relay/cert.pem ~/.relay/key.pem
@@ -285,7 +295,7 @@ chown ${RUSER}:${RUSER} ${RHOME}/.relay/cert.pem ${RHOME}/.relay/key.pem
 chmod 600 ${RHOME}/.relay/key.pem
 pkill -HUP relay 2>/dev/null || true'
   write_remote_file_sudo "$host" "/etc/letsencrypt/renewal-hooks/deploy/relay.sh" "$hook"
-  remote "$host" "sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/relay.sh"
+  remote_s "$host" "sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/relay.sh"
 }
 
 setup_tls() {
@@ -294,7 +304,8 @@ setup_tls() {
 
   # Check for an existing Let's Encrypt cert
   local domain
-  domain=$(remote "$host" 'sudo ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1' || true)
+  domain=$(remote_s "$host" 'sudo ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1' 2>/dev/null || true)
+  domain="${domain//$'\r'/}"
 
   if [[ -n "$domain" ]]; then
     info "Let's Encrypt cert already present for: $domain"
@@ -336,7 +347,7 @@ setup_tls() {
   install_certbot "$host"
 
   info "Running certbot --standalone for $le_domain …"
-  remote "$host" "sudo certbot certonly --standalone --non-interactive \
+  remote_s "$host" "sudo certbot certonly --standalone --non-interactive \
     --agree-tos --email '${le_email}' -d '${le_domain}'"
 
   copy_le_cert "$host" "$le_domain"
