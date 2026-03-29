@@ -158,7 +158,9 @@ async fn run_subscriber_loop(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("Subscriber {id} lagged by {n} frames, continuing");
+                tracing::warn!("Subscriber {id} lagged by {n} frames, requesting keyframe");
+                let kf = bytes::Bytes::from_static(b"{\"cmd\":\"force_keyframe\"}");
+                let _ = cmd_bcast_tx.send((id, kf));
             }
             Err(broadcast::error::RecvError::Closed) => {
                 tracing::info!("Subscriber {id}: broadcast channel closed");

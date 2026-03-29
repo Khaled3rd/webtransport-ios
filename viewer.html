@@ -243,7 +243,10 @@ function initDecoder(codec) {
       ctx.drawImage(frame, 0, 0);
       frame.close();
     },
-    error: e => console.warn('VideoDecoder error:', e),
+    error: e => {
+      console.warn('VideoDecoder error:', e);
+      sendCmd({cmd: 'force_keyframe'});
+    },
   });
   decoder.configure({ codec, optimizeForLatency: true });
   codecStr = codec;
@@ -273,6 +276,7 @@ function decodeFrame(annexB, isKeyframe) {
     frameTs += 33333; // ~30 fps in microseconds; display layer handles timing
   } catch (e) {
     console.warn('decode error:', e);
+    sendCmd({cmd: 'force_keyframe'});
   }
 }
 

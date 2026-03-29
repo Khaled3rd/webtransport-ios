@@ -71,6 +71,11 @@ async fn connect_and_stream(
 
     tracing::info!("Publish stream open, streaming frames");
 
+    // Flush any stale frames queued during reconnection, then force an IDR
+    // so the viewer always starts with a clean keyframe on every connection.
+    while rx.try_recv().is_ok() {}
+    let _ = enc_cmd_tx.send((EncoderCommand::ForceKeyframe, 0)).await;
+
     // Open a bidi stream for the command channel. Non-fatal if it fails.
     let cmd_task_handles = match connection.open_bi().await {
         Ok(bi_opening) => match bi_opening.await {

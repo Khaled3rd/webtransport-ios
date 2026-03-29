@@ -141,7 +141,9 @@ async fn run(config: Config) -> Result<(), StreamerError> {
                     match nal_tx_clone.try_send(nals) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
-                            // Transport is busy — drop this frame, keep encoding
+                            // Transport is busy — drop this frame, force IDR next
+                            // so the viewer doesn't receive a delta missing its reference.
+                            encoder.force_idr_next = true;
                         }
                         Err(TrySendError::Closed(_)) => {
                             tracing::info!("NAL channel closed, stopping encoder");
