@@ -70,7 +70,40 @@ relay/                    Rust WebTransport relay server (wtransport 0.4, vendor
 streamer/                 Rust V4L2 → x264 → WebTransport streamer (vendored x264 + wtransport)
 toy_controller.py         Python script — receives move commands via Unix socket, drives motors
 viewer.html               Browser viewer — WebTransport + WebCodecs H.264, D-pad, encoder controls
+deploy.sh                 One-shot deploy script — installs, builds, and configures relay or streamer
 ```
+
+---
+
+## Quick Deploy (`deploy.sh`)
+
+`deploy.sh` handles everything end-to-end over SSH: installs system packages, installs
+Rust, syncs the source, writes a `config.toml`, sets up TLS, builds the binary, installs
+a systemd service, and starts it. Run it from your dev machine.
+
+```bash
+chmod +x deploy.sh
+
+./deploy.sh relay                               # deploy relay (default: Riyadh_laptop)
+./deploy.sh streamer                            # deploy streamer (default: lviv_laptop)
+./deploy.sh streamer --host pi@192.168.1.42     # deploy streamer to a Raspberry Pi
+./deploy.sh both                                # deploy relay + streamer in sequence
+./deploy.sh                                     # interactive menu
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--host HOST` | SSH destination (`user@host` or `~/.ssh/config` alias) |
+| `--dir DIR` | Remote working directory (default: `~/relay` or `~/streamer`) |
+| `--force-config` | Overwrite an existing `config.toml` on the remote |
+| `--no-service` | Skip systemd service installation |
+
+The script prompts for token, bitrate, resolution, etc. with sensible defaults. It
+auto-detects Raspberry Pi models and suggests lower resolution defaults for Pi 3 / Zero.
+Re-running is safe — it skips steps that are already complete (existing config, existing
+packages, etc.) and always rebuilds the binary.
 
 ---
 
