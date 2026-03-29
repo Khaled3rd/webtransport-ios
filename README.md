@@ -409,6 +409,16 @@ cargo install cross --locked
 rustup target add aarch64-unknown-linux-gnu
 ```
 
+> **Apple Silicon (M1 / M2 / M3 / M4)**: `cross` unconditionally tries to install
+> `stable-x86_64-unknown-linux-gnu` on the host before entering Docker. rustup refuses
+> because that toolchain can't run natively on ARM macOS. Pre-install it with
+> `--force-non-host` to let cross proceed (the toolchain is only used inside the
+> x86_64 Linux container, not on macOS):
+>
+> ```bash
+> rustup toolchain add stable-x86_64-unknown-linux-gnu --profile minimal --force-non-host
+> ```
+
 #### 3. Build
 
 The `Cross.toml` at `ios/streamer/Cross.toml` tells `cross` to install
@@ -435,6 +445,7 @@ scp target/aarch64-unknown-linux-gnu/release/streamer pi@raspberrypi:~/
 | `docker: command not found` | Docker Desktop is not installed or not in PATH — install it and relaunch the terminal |
 | `Cannot connect to the Docker daemon` | Docker Desktop is not running — open it from Applications and wait for the whale icon to settle |
 | `cross: command not found` | Run `cargo install cross --locked` and ensure `~/.cargo/bin` is in your PATH |
+| `toolchain 'stable-x86_64-unknown-linux-gnu' may not be able to run` (Apple Silicon) | cross tries to install an x86_64 Linux toolchain on ARM macOS before entering Docker | `rustup toolchain add stable-x86_64-unknown-linux-gnu --profile minimal --force-non-host` |
 | First build takes > 30 min | Normal — pulling the image + compiling vendored crates from scratch; subsequent builds are much faster |
 | `apt-get: command not found` (inside container) | The cross image is Alpine-based for some targets; file an issue — use Option A as fallback |
 | Build succeeds but binary crashes on Pi | Architecture mismatch — confirm Pi is running 64-bit OS (`uname -m` should print `aarch64`) |
