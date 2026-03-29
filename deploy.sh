@@ -235,26 +235,42 @@ ask_secret() {
 }
 
 # ── TLS (relay only) ──────────────────────────────────────────────────────────
-setup_tls() {
-  local host="$1" relay_dir="$2"
-  step "TLS certificate"
 
-  # Look for a Let's Encrypt cert
-  local domain
-  domain=$(remote "$host" 'sudo ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1' || true)
+install_certbot() {
+  local host="$1"
+  if remote "$host" 'command -v certbot > /dev/null 2>&1'; then
+    ok "certbot already installed"
+    return
+  fi
+  info "Installing certbot …"
+  if remote "$host" 'command -v apt-get > /dev/null 2>&1'; then
+    remote "$host" "sudo apt-get install -y -qq certbot"
+  elif remote "$host" 'command -v dnf > /dev/null 2>&1'; then
+    # Amazon Linux 2023 / Fedora — certbot may be in the repo or via pip
+    remote "$host" "sudo dnf install -y -q certbot 2>/dev/null || sudo pip3 install certbot"
+  elif remote "$host" 'command -v yum > /dev/null 2>&1'; then
+    # Amazon Linux 2 — needs EPEL first
+    remote "$host" "sudo amazon-linux-extras install -y epel 2>/dev/null || true
+      sudo yum install -y -q certbot 2>/dev/null || sudo pip3 install certbot"
+  else
+    # Universal fallback
+    remote "$host" "sudo pip3 install certbot"
+  fi
+  ok "certbot installed"
+}
 
-  if [[ -n "$domain" ]]; then
-    info "Let's Encrypt cert found for: $domain"
-    remote "$host" "
-      mkdir -p ~/.relay
-      sudo cp /etc/letsencrypt/live/${domain}/fullchain.pem ~/.relay/cert.pem
-      sudo cp /etc/letsencrypt/live/${domain}/privkey.pem   ~/.relay/key.pem
-      sudo chown \"\$(whoami):\$(whoami)\" ~/.relay/cert.pem ~/.relay/key.pem
-      chmod 600 ~/.relay/key.pem
-    "
-    # Renewal hook
-    local hook
-    hook='#!/bin/bash
+copy_le_cert() {
+  # Copy an existing Let's Encrypt cert into ~/.relay/ and install the renewal hook
+  local host="$1" domain="$2"
+  remote "$host" "
+    mkdir -p ~/.relay
+    sudo cp /etc/letsencrypt/live/${domain}/fullchain.pem ~/.relay/cert.pem
+    sudo cp /etc/letsencrypt/live/${domain}/privkey.pem   ~/.relay/key.pem
+    sudo chown \"\$(whoami):\$(whoami)\" ~/.relay/cert.pem ~/.relay/key.pem
+    chmod 600 ~/.relay/key.pem
+  "
+  local hook
+  hook='#!/bin/bash
 DOMAIN=$(ls /etc/letsencrypt/live/ | grep -v README | head -1)
 RUSER=$(stat -c "%U" /home/$(ls /home | head -1) 2>/dev/null || echo b)
 RHOME=$(eval echo "~${RUSER}")
@@ -263,15 +279,64 @@ cp /etc/letsencrypt/live/${DOMAIN}/privkey.pem   ${RHOME}/.relay/key.pem
 chown ${RUSER}:${RUSER} ${RHOME}/.relay/cert.pem ${RHOME}/.relay/key.pem
 chmod 600 ${RHOME}/.relay/key.pem
 pkill -HUP relay 2>/dev/null || true'
-    write_remote_file_sudo "$host" "/etc/letsencrypt/renewal-hooks/deploy/relay.sh" "$hook"
-    remote "$host" "sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/relay.sh"
-    ok "TLS cert copied; auto-renewal hook installed"
-  else
-    warn "No Let's Encrypt cert found on $host"
-    warn "The relay will auto-generate a self-signed cert (valid 14 days)"
-    warn "For production: install certbot, obtain a cert, then rerun deploy.sh relay"
-    remote "$host" "mkdir -p ~/.relay"
+  write_remote_file_sudo "$host" "/etc/letsencrypt/renewal-hooks/deploy/relay.sh" "$hook"
+  remote "$host" "sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/relay.sh"
+}
+
+setup_tls() {
+  local host="$1"
+  step "TLS certificate"
+
+  # Check for an existing Let's Encrypt cert
+  local domain
+  domain=$(remote "$host" 'sudo ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1' || true)
+
+  if [[ -n "$domain" ]]; then
+    info "Let's Encrypt cert already present for: $domain"
+    copy_le_cert "$host" "$domain"
+    ok "Cert copied to ~/.relay/; renewal hook installed"
+    return
   fi
+
+  # No cert yet — ask whether to obtain one now
+  echo
+  warn "No Let's Encrypt cert found on $host"
+  echo -e "  ${BLD}Option 1${RST} — Obtain a cert now via certbot (recommended)"
+  echo -e "           Requires: domain name pointing to this server + TCP 80 open"
+  echo -e "  ${BLD}Option 2${RST} — Skip; relay auto-generates a self-signed cert (14-day expiry)"
+  echo
+  local choice
+  read -rp "$(printf '%b' "${CYN}?${RST} Obtain a Let's Encrypt cert now? [Y/n]: ")" choice
+  choice="${choice:-Y}"
+
+  if [[ ! "$choice" =~ ^[Yy] ]]; then
+    warn "Skipping TLS — relay will use a self-signed cert (only suitable for testing)"
+    remote "$host" "mkdir -p ~/.relay"
+    return
+  fi
+
+  # Prompt for domain and email
+  local le_domain le_email
+  ask "Domain name pointing to this server (e.g. relay.example.com)" "" le_domain
+  [[ -z "$le_domain" ]] && die "A domain name is required for Let's Encrypt"
+  ask "Email address (certbot expiry notifications)" "" le_email
+  [[ -z "$le_email" ]] && die "An email address is required for Let's Encrypt"
+
+  echo
+  warn "Make sure before continuing:"
+  echo -e "  • DNS: ${BLD}${le_domain}${RST} → this server's public IP"
+  echo -e "  • Firewall: ${BLD}TCP 80${RST} inbound open (HTTP-01 challenge)"
+  read -rp $'\nReady? Press Enter to continue, Ctrl-C to abort … '
+
+  install_certbot "$host"
+
+  info "Running certbot --standalone for $le_domain …"
+  remote "$host" "sudo certbot certonly --standalone --non-interactive \
+    --agree-tos --email '${le_email}' -d '${le_domain}'"
+
+  copy_le_cert "$host" "$le_domain"
+  ok "Let's Encrypt cert obtained and installed for $le_domain"
+  ok "Auto-renewal configured — cert will renew automatically every 60 days"
 }
 
 # ── Relay config ──────────────────────────────────────────────────────────────
