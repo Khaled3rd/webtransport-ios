@@ -1,5 +1,5 @@
 fn main() {
-    println!("cargo:rustc-link-lib=x264");
+    println!("cargo:rustc-link-lib=static=x264");
     println!("cargo:rerun-if-changed=data/x264.h");
 
     let version_output = std::process::Command::new("pkg-config")
