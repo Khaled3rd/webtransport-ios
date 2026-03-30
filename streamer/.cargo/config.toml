@@ -2,4 +2,4 @@
 linker = "/usr/local/bin/zig-aarch64-cc"
 # Ubuntu multiarch installs arm64 libs to /usr/lib/aarch64-linux-gnu/ but the
 # cross sysroot searches /usr/aarch64-linux-gnu/lib/.  Add both so -lx264 is found.
-rustflags = ["-L", "/usr/lib/aarch64-linux-gnu"]
+rustflags = ["-L", "/usr/lib/aarch64-linux-gnu", "-C", "link-arg=-no-pie"]
