@@ -1,5 +1,13 @@
 fn main() {
-    println!("cargo:rustc-link-lib=static=x264");
+    // Static link for aarch64 cross-builds (Pi): avoids libx264.so version
+    // mismatch between the Ubuntu 16.04 build container and Pi OS Bookworm.
+    // Dynamic link everywhere else (x86_64 Linux, macOS) where .so/.dylib is fine.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target == "aarch64-unknown-linux-gnu" {
+        println!("cargo:rustc-link-lib=static=x264");
+    } else {
+        println!("cargo:rustc-link-lib=x264");
+    }
     println!("cargo:rerun-if-changed=data/x264.h");
 
     let version_output = std::process::Command::new("pkg-config")
