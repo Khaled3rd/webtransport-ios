@@ -161,16 +161,34 @@ ensure_deps() {
   ok "Packages ready"
 }
 
-# ── Remote: build ─────────────────────────────────────────────────────────────
+# ── Remote: native build ──────────────────────────────────────────────────────
 build_remote() {
   local host="$1" dir="$2"
   step "Build"
   info "Running 'CC=clang cargo build --release' on $host …"
-  info "(Pi 3 can take 30-40 min; Pi 4 ~10 min; x86_64 ~3-5 min)"
+  info "(Pi 3/arm32 can take 30-40 min; x86_64 ~3-5 min)"
   remote "$host" "source ~/.cargo/env 2>/dev/null || true
     cd $dir
     CC=clang cargo build --release 2>&1"
   ok "Build complete"
+}
+
+# ── Local: cross-compile for aarch64 (Pi 4/5 64-bit) ─────────────────────────
+build_cross_aarch64() {
+  local src_dir="$1"
+  step "Cross-compile  (local macOS → aarch64-linux)"
+  if ! command -v cross &>/dev/null; then
+    die "'cross' not found on this machine.
+  Install: cargo install cross --git https://github.com/cross-rs/cross"
+  fi
+  if ! docker info &>/dev/null 2>&1; then
+    die "Docker is not running. Start Docker Desktop, then retry."
+  fi
+  info "DOCKER_DEFAULT_PLATFORM=linux/amd64 cross build --release --target aarch64-unknown-linux-gnu"
+  info "(First run: ~5 min — pulls Docker image + compiles deps; subsequent runs: ~1-2 min)"
+  ( cd "$src_dir" && DOCKER_DEFAULT_PLATFORM=linux/amd64 \
+      cross build --release --target aarch64-unknown-linux-gnu )
+  ok "Cross-compile complete"
 }
 
 # ── Remote: systemd service ───────────────────────────────────────────────────
@@ -536,6 +554,11 @@ deploy_streamer() {
   arch=$(remote "$host" 'uname -m')
   info "Architecture: $arch"
 
+  # aarch64 (Pi 4/5 64-bit): cross-compile locally and upload binary.
+  # arm32 / x86_64: build natively on the remote host.
+  local cross_compile=0
+  [[ "$arch" == "aarch64" ]] && cross_compile=1
+
   local default_w=1280 default_h=720 default_fps=30
   local default_fmt=MJPEG default_bitrate=2000
 
@@ -548,7 +571,7 @@ deploy_streamer() {
         default_w=640; default_h=480; default_fps=15; default_bitrate=800
         warn "Pi 3 / 2 / Zero detected — defaulting to 640×480 / 15fps for CPU headroom"
       else
-        info "Pi 4 / 5 detected — defaulting to 1280×720 / 30fps"
+        info "Pi 4 / 5 (aarch64) — will cross-compile locally, then upload binary"
       fi
     fi
   fi
@@ -556,26 +579,46 @@ deploy_streamer() {
   # ── Prompts ────────────────────────────────────────────────────────────────
   header "Configuration"
   local relay_url token device width height fps fmt bitrate
-  ask "Relay publish URL"      "https://ruh.sunbour.com:4433/publish" relay_url
-  ask "Publish token"          "secret-publish-token"                 token
-  ask "Camera device"          "/dev/video0"                          device
-  ask "Capture width"          "$default_w"                           width
-  ask "Capture height"         "$default_h"                           height
-  ask "Capture fps"            "$default_fps"                         fps
-  ask "Pixel format (MJPEG/YUYV)" "$default_fmt"                     fmt
-  ask "Encoder bitrate kbps"   "$default_bitrate"                     bitrate
+  ask "Relay publish URL"         "https://ruh.sunbour.com:4433/publish" relay_url
+  ask "Publish token"             "secret-publish-token"                 token
+  ask "Camera device"             "/dev/video0"                          device
+  ask "Capture width"             "$default_w"                           width
+  ask "Capture height"            "$default_h"                           height
+  ask "Capture fps"               "$default_fps"                         fps
+  ask "Pixel format (MJPEG/YUYV)" "$default_fmt"                        fmt
+  ask "Encoder bitrate kbps"      "$default_bitrate"                     bitrate
 
   # ── Deps ───────────────────────────────────────────────────────────────────
-  ensure_deps "$host" streamer
-  ensure_rust "$host"
+  if [[ $cross_compile -eq 1 ]]; then
+    # Pre-built binary: no Rust or build tools needed on the Pi.
+    # Install only runtime utilities (v4l-utils for camera diagnostics,
+    # python3 for toy_controller.py).
+    step "System packages"
+    if remote "$host" 'command -v apt-get > /dev/null 2>&1'; then
+      info "apt-get install: v4l-utils python3"
+      remote_s "$host" "export DEBIAN_FRONTEND=noninteractive
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq v4l-utils python3"
+    else
+      warn "Unknown package manager — install v4l-utils and python3 manually if needed"
+    fi
+    ok "Packages ready"
+  else
+    ensure_deps "$host" streamer
+    ensure_rust "$host"
+  fi
 
   # ── Source ─────────────────────────────────────────────────────────────────
   step "Sync source"
-  remote "$host" "mkdir -p $abs_dir"
-  push "$SCRIPT_DIR/streamer/" "$host" "$abs_dir/"
-  # Toy controller alongside the streamer
+  if [[ $cross_compile -eq 1 ]]; then
+    # Pi only needs target/release/ dir (for the uploaded binary) and the root dir.
+    remote "$host" "mkdir -p $abs_dir/target/release"
+  else
+    remote "$host" "mkdir -p $abs_dir"
+    push "$SCRIPT_DIR/streamer/" "$host" "$abs_dir/"
+  fi
   rsync -az -e "ssh ${SSH_OPTS[*]}" "$SCRIPT_DIR/toy_controller.py" "${host}:${rhome}/toy_controller.py"
-  ok "Source and toy_controller.py synced to $host"
+  ok "toy_controller.py synced to $host"
 
   # ── Config ─────────────────────────────────────────────────────────────────
   step "Config"
@@ -589,14 +632,24 @@ deploy_streamer() {
     ok "config.toml already exists — skipping (use --force-config to overwrite)"
   fi
 
-  # ── Build ──────────────────────────────────────────────────────────────────
-  build_remote "$host" "$abs_dir"
+  # ── Build / Upload ─────────────────────────────────────────────────────────
+  if [[ $cross_compile -eq 1 ]]; then
+    build_cross_aarch64 "$SCRIPT_DIR/streamer"
+    step "Upload binary"
+    local bin_src="$SCRIPT_DIR/streamer/target/aarch64-unknown-linux-gnu/release/streamer"
+    [[ -f "$bin_src" ]] || die "Cross-compiled binary not found: $bin_src"
+    rsync -az --progress -e "ssh ${SSH_OPTS[*]}" \
+      "$bin_src" "${host}:${abs_dir}/target/release/streamer"
+    ok "Binary uploaded to $host:$abs_dir/target/release/streamer"
+  else
+    build_remote "$host" "$abs_dir"
+  fi
 
   # ── Service ────────────────────────────────────────────────────────────────
   maybe_install_service "$host" "streamer" "$ruser" "$abs_dir"
 
   header "Streamer deployment done"
-  ok "Streamer running on $host"
+  ok "Streamer binary at $host:$abs_dir/target/release/streamer"
   echo -e "  Logs    : ${CYN}ssh $host 'journalctl -u streamer -f'${RST}"
   echo -e "  Toy ctrl: ${CYN}ssh $host 'python3 ~/toy_controller.py'${RST}"
 
